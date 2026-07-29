@@ -1,0 +1,200 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+var ErrForbidden = errors.New("forbidden")
+var ErrConflict = errors.New("conflict")
+
+func (s *Store) BootstrapOwner(ctx context.Context, tenantID, displayName, token string) error {
+	hash := sha256.Sum256([]byte(token))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin owner bootstrap: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var principalID string
+	err = tx.QueryRow(ctx, `
+		WITH inserted AS (
+			INSERT INTO principals (kind, issuer, subject, display_name)
+			VALUES ('api_key', 'nimbus:local', $1, $2)
+			ON CONFLICT DO NOTHING RETURNING id
+		)
+		SELECT id FROM inserted UNION ALL
+		SELECT id FROM principals WHERE issuer='nimbus:local' AND subject=$1 LIMIT 1`, tenantID, displayName).Scan(&principalID)
+	if err != nil {
+		return fmt.Errorf("bootstrap owner principal: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO memberships (tenant_id, principal_id, role)
+		VALUES ($1, $2, 'owner')
+		ON CONFLICT (tenant_id, principal_id) DO NOTHING`, tenantID, principalID); err != nil {
+		return fmt.Errorf("bootstrap owner membership: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO api_keys (tenant_id, principal_id, name, prefix, secret_hash)
+		VALUES ($1, $2, 'Local bootstrap key', $3, $4)
+		ON CONFLICT (secret_hash) DO NOTHING`, tenantID, principalID, tokenPrefix(token), hash[:]); err != nil {
+		return fmt.Errorf("bootstrap owner API key: %w", err)
+	}
+	var systemID string
+	err = tx.QueryRow(ctx, `WITH inserted AS (
+		INSERT INTO principals (kind,issuer,subject,display_name) VALUES ('system','nimbus:system',$1,'Nimbus automation')
+		ON CONFLICT DO NOTHING RETURNING id)
+		SELECT id FROM inserted UNION ALL SELECT id FROM principals WHERE issuer='nimbus:system' AND subject=$1 LIMIT 1`, tenantID).Scan(&systemID)
+	if err != nil {
+		return fmt.Errorf("bootstrap system principal: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO memberships (tenant_id,principal_id,role) VALUES ($1,$2,'operator') ON CONFLICT DO NOTHING`, tenantID, systemID); err != nil {
+		return fmt.Errorf("bootstrap system membership: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit owner bootstrap: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) AuthenticateAPIKey(ctx context.Context, token string) (Principal, error) {
+	hash := sha256.Sum256([]byte(token))
+	var result Principal
+	err := s.pool.QueryRow(ctx, `
+		SELECT p.id, m.tenant_id, p.display_name, m.role
+		FROM api_keys k
+		JOIN principals p ON p.id = k.principal_id
+		JOIN memberships m ON m.tenant_id = k.tenant_id AND m.principal_id = p.id
+		WHERE k.secret_hash = $1 AND k.revoked_at IS NULL
+		  AND (k.expires_at IS NULL OR k.expires_at > now()) AND m.status = 'active'`, hash[:]).
+		Scan(&result.ID, &result.TenantID, &result.Name, &result.Role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Principal{}, ErrForbidden
+	}
+	if err != nil {
+		return Principal{}, fmt.Errorf("authenticate API key: %w", err)
+	}
+	_, _ = s.pool.Exec(ctx, "UPDATE api_keys SET last_used_at = now() WHERE secret_hash = $1", hash[:])
+	return result, nil
+}
+
+func (s *Store) CreateAPIKey(ctx context.Context, actor Principal, name, role, token string, expiresAt *time.Time) (APIKey, error) {
+	if role != "owner" && role != "operator" && role != "approver" && role != "viewer" {
+		return APIKey{}, fmt.Errorf("invalid role %q", role)
+	}
+	hash := sha256.Sum256([]byte(token))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return APIKey{}, fmt.Errorf("begin API key creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var principalID string
+	err = tx.QueryRow(ctx, `INSERT INTO principals (kind, display_name) VALUES ('api_key', $1) RETURNING id`, name).Scan(&principalID)
+	if err != nil {
+		return APIKey{}, fmt.Errorf("create API key principal: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO memberships (tenant_id, principal_id, role) VALUES ($1, $2, $3)`, actor.TenantID, principalID, role); err != nil {
+		return APIKey{}, fmt.Errorf("create API key membership: %w", err)
+	}
+	var result APIKey
+	err = tx.QueryRow(ctx, `
+		INSERT INTO api_keys (tenant_id, principal_id, name, prefix, secret_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, name, prefix, expires_at, revoked_at, created_at`,
+		actor.TenantID, principalID, name, tokenPrefix(token), hash[:], expiresAt).
+		Scan(&result.ID, &result.Name, &result.Prefix, &result.ExpiresAt, &result.RevokedAt, &result.CreatedAt)
+	if err != nil {
+		return APIKey{}, fmt.Errorf("create API key: %w", err)
+	}
+	result.Role = role
+	if err := insertAudit(ctx, tx, actor, "api_key.create", "api_key", result.ID, "succeeded", map[string]any{"role": role}); err != nil {
+		return APIKey{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return APIKey{}, fmt.Errorf("commit API key creation: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]APIKey, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT k.id, k.name, k.prefix, m.role, k.expires_at, k.revoked_at, k.created_at
+		FROM api_keys k JOIN memberships m ON m.tenant_id = k.tenant_id AND m.principal_id = k.principal_id
+		WHERE k.tenant_id = $1 ORDER BY k.created_at DESC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list API keys: %w", err)
+	}
+	defer rows.Close()
+	result := make([]APIKey, 0)
+	for rows.Next() {
+		var item APIKey
+		if err := rows.Scan(&item.ID, &item.Name, &item.Prefix, &item.Role, &item.ExpiresAt, &item.RevokedAt, &item.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan API key: %w", err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RevokeAPIKey(ctx context.Context, actor Principal, id string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin API key revocation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `UPDATE api_keys SET revoked_at = now() WHERE tenant_id = $1 AND id = $2 AND revoked_at IS NULL`, actor.TenantID, id)
+	if err != nil {
+		return fmt.Errorf("revoke API key: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err := insertAudit(ctx, tx, actor, "api_key.revoke", "api_key", id, "succeeded", map[string]any{}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) ListAuditEvents(ctx context.Context, tenantID string, limit int) ([]AuditEvent, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, actor_id, action, resource_type, resource_id, result, metadata, occurred_at
+		FROM audit_events WHERE tenant_id = $1 ORDER BY occurred_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list audit events: %w", err)
+	}
+	defer rows.Close()
+	result := make([]AuditEvent, 0)
+	for rows.Next() {
+		var item AuditEvent
+		if err := rows.Scan(&item.ID, &item.ActorID, &item.Action, &item.ResourceType, &item.ResourceID, &item.Result, &item.Metadata, &item.OccurredAt); err != nil {
+			return nil, fmt.Errorf("scan audit event: %w", err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func insertAudit(ctx context.Context, tx pgx.Tx, actor Principal, action, resourceType, resourceID, result string, metadata map[string]any) error {
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("encode audit metadata: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_events (tenant_id, actor_id, action, resource_type, resource_id, result, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, actor.TenantID, actor.ID, action, resourceType, resourceID, result, encoded); err != nil {
+		return fmt.Errorf("insert audit event: %w", err)
+	}
+	return nil
+}
+
+func tokenPrefix(token string) string {
+	if len(token) <= 10 {
+		return token
+	}
+	return token[:10]
+}

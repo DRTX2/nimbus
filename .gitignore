@@ -1,0 +1,17 @@
+.idea/
+.env
+.env.*
+!.env.example
+bin/
+coverage.out
+*.log
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+!infra/terraform/environments/sandbox/.terraform.lock.hcl
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

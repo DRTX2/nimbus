@@ -1,0 +1,110 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/david/nimbus/internal/config"
+	"github.com/david/nimbus/internal/execution"
+	"github.com/david/nimbus/internal/httpapi"
+	"github.com/david/nimbus/internal/platform/database"
+	"github.com/david/nimbus/internal/platform/observability"
+	"github.com/david/nimbus/internal/store"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := run(logger); err != nil {
+		logger.Error("Nimbus stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := database.Open(rootCtx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := database.Migrate(rootCtx, pool); err != nil {
+		return err
+	}
+	repository := store.New(pool)
+	if err := repository.BootstrapTenant(rootCtx, cfg.TenantID, cfg.TenantName); err != nil {
+		return err
+	}
+	if err := repository.BootstrapOwner(rootCtx, cfg.TenantID, "Nimbus Local Owner", cfg.APIKey); err != nil {
+		return err
+	}
+
+	shutdownTracing, err := observability.SetupTracing(rootCtx, cfg.OTLPEndpoint)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			logger.Error("trace shutdown failed", "error", err)
+		}
+	}()
+
+	metrics := observability.NewMetrics()
+	var workers sync.WaitGroup
+	if cfg.Component == "all" || cfg.Component == "worker" {
+		worker := execution.NewWorker(repository, logger, metrics, cfg.WorkerCount, cfg.PollInterval, cfg.LeaseDuration, cfg.OutboundAllowedHosts)
+		publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
+		workers.Add(2)
+		go func() { defer workers.Done(); worker.Run(rootCtx) }()
+		go func() { defer workers.Done(); publisher.Run(rootCtx) }()
+	}
+	handler := httpapi.NewOperational(repository, metrics, logger)
+	if cfg.Component == "all" || cfg.Component == "api" {
+		handler = httpapi.New(repository, metrics, logger)
+	}
+
+	server := &http.Server{
+		Addr:              cfg.HTTPAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info("Nimbus started", "address", cfg.HTTPAddress, "environment", cfg.Environment, "component", cfg.Component, "workers", cfg.WorkerCount)
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case <-rootCtx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		workers.Wait()
+		return nil
+	case err := <-serverErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
