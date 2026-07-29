@@ -168,7 +168,9 @@ Security controls implemented today:
 - Hashed, persisted, expiring and revocable API keys; tenant and role derive from authentication.
 - Permission checks for identity, workflows, pipelines, incidents, approvals, audit, and reads.
 - Tenant predicates in every application query.
-- PostgreSQL RLS policies prepared on every tenant-scoped table; local owner roles bypass them.
+- Forced PostgreSQL RLS on every tenant-scoped table, with API policy bound to
+  the authenticated key capability and separate non-owner API/worker roles in
+  split and Kubernetes profiles.
 - Approval separation of duties and append-only audit-event API.
 - 1 MiB request limit, bounded worker count, response size, retries, and timeouts.
 - SSRF protection for HTTP steps, no redirects, and cloud metadata/private IP blocking.
@@ -177,7 +179,7 @@ Security controls implemented today:
 - GitHub Actions pinned by commit, Dependabot, CodeQL, and least-privilege cloud guidance.
 
 This is a production-oriented portfolio beta, not yet a hosted production security boundary.
-OIDC/JWKS, dedicated non-owner database roles, encrypted general-purpose secret
+OIDC/JWKS, encrypted general-purpose secret
 references, signed webhook delivery, quotas, and restore evidence remain blockers. See
 [`SECURITY.md`](SECURITY.md).
 

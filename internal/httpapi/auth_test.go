@@ -19,3 +19,28 @@ func TestRoleAllows(t *testing.T) {
 		}
 	}
 }
+
+func TestBearerToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+		ok    bool
+	}{
+		{name: "standard", value: "Bearer token", want: "token", ok: true},
+		{name: "case insensitive scheme", value: "bearer token", want: "token", ok: true},
+		{name: "surrounding whitespace", value: "  Bearer   token  ", want: "token", ok: true},
+		{name: "raw token", value: "token"},
+		{name: "missing token", value: "Bearer"},
+		{name: "extra field", value: "Bearer token extra"},
+		{name: "wrong scheme", value: "Basic token"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := bearerToken(test.value)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("bearerToken(%q) = (%q, %v), want (%q, %v)", test.value, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}

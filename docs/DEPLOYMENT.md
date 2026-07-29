@@ -2,12 +2,36 @@
 
 ## Local
 
-`make dev` builds and starts PostgreSQL, runs the one-shot `nimbus-migrate`
-component, and starts Nimbus, Prometheus, Grafana, and Jaeger. API and worker
-components only verify the embedded migration checksums; they never execute DDL
-or bootstrap identities. Use `docker compose ps`, `/health/ready`, and the demo
-in the README as smoke checks. `docker compose down -v` deletes local data and
-is intentionally not a Make target.
+`make dev` builds the local monolith with the database owner for convenience.
+`make dev-split` runs API and worker independently with the non-owner
+`nimbus_api` and `nimbus_worker` roles. Both profiles provision those local-only
+roles on first database initialization and run the one-shot `nimbus-migrate`
+component. Runtime components only verify embedded migration checksums; they
+never execute DDL or bootstrap identities. The monolith is not evidence of a
+hosted database boundary; use the split profile for RLS validation. Use
+`docker compose ps`, `/health/ready`, and the README demo as smoke checks.
+`docker compose down -v` deletes local data and is intentionally not a Make
+target.
+
+The init script does not run again for an existing PostgreSQL volume. Provision
+the two roles explicitly before upgrading such a volume; do not delete an active
+volume to force initialization.
+
+For the local Compose database, stop the application components, run the
+idempotent provisioning script already mounted in PostgreSQL, then rerun the
+migrator:
+
+```bash
+docker compose -f compose.yaml -f compose.split.yaml stop \
+  nimbus-api nimbus-worker nimbus-migrate
+docker compose exec -T postgres psql -U nimbus -d nimbus \
+  < deploy/postgres/init-runtime-roles.sql
+docker compose -f compose.yaml -f compose.split.yaml up nimbus-migrate
+docker compose -f compose.yaml -f compose.split.yaml up -d nimbus-api nimbus-worker
+```
+
+Migration 005 intentionally fails if either runtime role is absent. Production
+operators must use platform-managed passwords instead of the local script.
 
 ## AWS Sandbox
 
@@ -57,7 +81,7 @@ even when instance compute is eligible for credits.
 
 ## Kubernetes Lab
 
-The base manifests expect an external PostgreSQL URL and a `nimbus-secrets`
+The base manifests expect external PostgreSQL URLs and a `nimbus-secrets`
 Secret. They work for learning on kind, k3d, or k3s; they do not install a
 database or ingress controller.
 
@@ -65,14 +89,18 @@ database or ingress controller.
 kubectl create namespace nimbus
 kubectl -n nimbus create secret generic nimbus-secrets \
   --from-literal=NIMBUS_API_KEY='replace-me-with-a-long-random-token' \
-  --from-literal=NIMBUS_DATABASE_URL='postgres://...'
+  --from-literal=NIMBUS_API_DATABASE_URL='postgres://nimbus_api:...@postgres.example:5432/nimbus?sslmode=require' \
+  --from-literal=NIMBUS_WORKER_DATABASE_URL='postgres://nimbus_worker:...@postgres.example:5432/nimbus?sslmode=require' \
+  --from-literal=NIMBUS_MIGRATOR_DATABASE_URL='postgres://nimbus_owner:...@postgres.example:5432/nimbus?sslmode=require'
 kubectl apply -k deploy/k8s/base
 ```
 
 The base includes a migration Job. A controlled deployment must wait for
 `job/nimbus-migrate` to complete before considering API or worker readiness;
-runtime pods fail closed while migrations are missing or checksums differ.
-Change the image from the placeholder before applying. Production needs separate
-migrator/runtime database credentials, TLS, network policies supported by the
+runtime pods fail closed while migrations are missing or checksums differ. The
+database platform must create non-owner `nimbus_api` and `nimbus_worker` roles
+before this Job runs; migration fails if either is absent and contains no
+hardcoded passwords. Change the image from the placeholder before applying. Production
+needs TLS, network policies supported by the
 cluster CNI, managed PostgreSQL, autoscaling evidence, disruption budgets,
 backups, and a secret-store integration.

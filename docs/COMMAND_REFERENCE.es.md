@@ -29,7 +29,7 @@ Versiones usadas en la validacion actual:
 make dev
 ```
 
-Construye la imagen e inicia Nimbus con API y workers en un proceso, PostgreSQL,
+Construye la imagen e inicia Nimbus con procesos separados de API y worker, PostgreSQL,
 Prometheus, Grafana y Jaeger. Compose espera la dependencia PostgreSQL; valida
 el resto mediante sus endpoints.
 

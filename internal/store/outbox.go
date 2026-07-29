@@ -11,8 +11,27 @@ import (
 )
 
 func (s *Store) ClaimOutbox(ctx context.Context, owner string, lease time.Duration) (OutboxMessage, bool, error) {
+	tenants, err := s.workerTenants(ctx, &s.outboxCursor)
+	if err != nil {
+		return OutboxMessage{}, false, err
+	}
+	for _, tenantID := range tenants {
+		message, found, err := s.claimTenantOutbox(ctx, tenantID, owner, lease)
+		if err != nil || found {
+			return message, found, err
+		}
+	}
+	return OutboxMessage{}, false, nil
+}
+
+func (s *Store) claimTenantOutbox(ctx context.Context, tenantID, owner string, lease time.Duration) (OutboxMessage, bool, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return OutboxMessage{}, false, fmt.Errorf("begin outbox claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var message OutboxMessage
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH candidate AS (
 			SELECT id FROM outbox_messages
 			WHERE published_at IS NULL AND attempt < max_attempts
@@ -30,20 +49,28 @@ func (s *Store) ClaimOutbox(ctx context.Context, owner string, lease time.Durati
 	if err != nil {
 		return OutboxMessage{}, false, fmt.Errorf("claim outbox: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return OutboxMessage{}, false, fmt.Errorf("commit outbox claim: %w", err)
+	}
 	return message, true, nil
 }
 
 func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error {
+	tx, err := s.beginTenant(ctx, message.TenantID)
+	if err != nil {
+		return fmt.Errorf("begin outbox publish: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if message.Topic == "incident.opened" {
 		var workflowID string
-		err := s.pool.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,'') FROM incidents i
+		err := tx.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,'') FROM incidents i
 			JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
 			WHERE i.tenant_id=$1 AND i.id=$2`, message.TenantID, message.AggregateID).Scan(&workflowID)
 		if err != nil {
 			return fmt.Errorf("load incident workflow: %w", err)
 		}
 		if workflowID != "" {
-			actor, err := s.systemPrincipal(ctx, message.TenantID)
+			actor, err := s.systemPrincipal(ctx, tx, message.TenantID)
 			if err != nil {
 				return err
 			}
@@ -53,7 +80,7 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 			}
 		}
 	}
-	command, err := s.pool.Exec(ctx, `UPDATE outbox_messages SET published_at=now(),lease_owner=NULL,lease_until=NULL
+	command, err := tx.Exec(ctx, `UPDATE outbox_messages SET published_at=now(),lease_owner=NULL,lease_until=NULL
 		WHERE id=$1 AND lease_owner=$2 AND attempt=$3`, message.ID, message.LeaseOwner, message.Attempt)
 	if err != nil {
 		return fmt.Errorf("publish outbox: %w", err)
@@ -61,26 +88,37 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 	if command.RowsAffected() != 1 {
 		return errors.New("outbox lease was lost")
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit outbox publish: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) FailOutbox(ctx context.Context, message OutboxMessage, failure string) error {
+	tx, err := s.beginTenant(ctx, message.TenantID)
+	if err != nil {
+		return fmt.Errorf("begin outbox failure: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	delay := time.Duration(message.Attempt*message.Attempt) * time.Second
-	_, err := s.pool.Exec(ctx, `UPDATE outbox_messages SET available_at=now()+($1*interval '1 millisecond'),last_error=$2,
+	_, err = tx.Exec(ctx, `UPDATE outbox_messages SET available_at=now()+($1*interval '1 millisecond'),last_error=$2,
 		lease_owner=NULL,lease_until=NULL WHERE id=$3 AND lease_owner=$4 AND attempt=$5`, delay.Milliseconds(), failure, message.ID, message.LeaseOwner, message.Attempt)
 	if err != nil {
 		return fmt.Errorf("fail outbox: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit outbox failure: %w", err)
+	}
 	return nil
 }
 
-func (s *Store) systemPrincipal(ctx context.Context, tenantID string) (Principal, error) {
+func (s *Store) systemPrincipal(ctx context.Context, tx pgx.Tx, tenantID string) (Principal, error) {
 	var result Principal
-	err := s.pool.QueryRow(ctx, `SELECT p.id,m.tenant_id,p.display_name,m.role FROM principals p
-		JOIN memberships m ON m.principal_id=p.id WHERE m.tenant_id=$1 AND m.status='active' AND p.kind='system'
-		LIMIT 1`, tenantID).Scan(&result.ID, &result.TenantID, &result.Name, &result.Role)
+	err := tx.QueryRow(ctx, `SELECT principal_id,display_name,membership_role
+		FROM public.nimbus_system_principal($1)`, tenantID).Scan(&result.ID, &result.Name, &result.Role)
 	if err != nil {
 		return Principal{}, fmt.Errorf("load system principal: %w", err)
 	}
+	result.TenantID = tenantID
 	return result, nil
 }

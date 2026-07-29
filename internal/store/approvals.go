@@ -12,7 +12,12 @@ import (
 )
 
 func (s *Store) ListApprovals(ctx context.Context, tenantID string) ([]Approval, error) {
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("begin approval list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
 		SELECT id, execution_id, status, requested_by, decided_by, reason, expires_at, decided_at, created_at
 		FROM approval_requests WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100`, tenantID)
 	if err != nil {
@@ -27,14 +32,20 @@ func (s *Store) ListApprovals(ctx context.Context, tenantID string) ([]Approval,
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit approval list: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Store) DecideApproval(ctx context.Context, actor Principal, approvalID, decision, comment string) (Approval, error) {
 	if decision != "approved" && decision != "rejected" {
 		return Approval{}, errors.New("decision must be approved or rejected")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return Approval{}, fmt.Errorf("begin approval decision: %w", err)
 	}

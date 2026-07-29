@@ -29,7 +29,7 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 	if pipeline.AgeThresholdSeconds == 0 {
 		pipeline.AgeThresholdSeconds = 300
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return Pipeline{}, fmt.Errorf("begin pipeline creation: %w", err)
 	}
@@ -55,7 +55,12 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 }
 
 func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline, error) {
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("begin pipeline list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
 		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_env,''),COALESCE(incident_workflow_id::text,''),
 			status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
@@ -72,12 +77,23 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit pipeline list: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Store) GetPipeline(ctx context.Context, tenantID, id string) (Pipeline, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return Pipeline{}, fmt.Errorf("begin get pipeline: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var item Pipeline
-	err := s.pool.QueryRow(ctx, `SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_env,''),
+	err = tx.QueryRow(ctx, `SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_env,''),
 		COALESCE(incident_workflow_id::text,''),status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 AND id=$2`, tenantID, id).Scan(&item.ID, &item.Name, &item.Mode, &item.Region,
 		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDEnv, &item.IncidentWorkflowID, &item.Status, &item.ConsecutiveWindows,
@@ -88,11 +104,14 @@ func (s *Store) GetPipeline(ctx context.Context, tenantID, id string) (Pipeline,
 	if err != nil {
 		return Pipeline{}, fmt.Errorf("get pipeline: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return Pipeline{}, fmt.Errorf("commit get pipeline: %w", err)
+	}
 	return item, nil
 }
 
 func (s *Store) RecordObservation(ctx context.Context, actor Principal, observation Observation) ([]Incident, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return nil, fmt.Errorf("begin observation: %w", err)
 	}
@@ -225,7 +244,12 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 }
 
 func (s *Store) ListIncidents(ctx context.Context, tenantID string) ([]Incident, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,recovered_at,resolved_at
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("begin incident list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `SELECT id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,recovered_at,resolved_at
 		FROM incidents WHERE tenant_id=$1 ORDER BY opened_at DESC LIMIT 100`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list incidents: %w", err)
@@ -239,11 +263,17 @@ func (s *Store) ListIncidents(ctx context.Context, tenantID string) ([]Incident,
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit incident list: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Store) AcknowledgeIncident(ctx context.Context, actor Principal, id string) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return err
 	}

@@ -12,8 +12,13 @@ import (
 )
 
 func (s *Store) GetExecution(ctx context.Context, tenantID, executionID string) (Execution, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return Execution{}, fmt.Errorf("begin get execution: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var result Execution
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT id, workflow_id, event_id, status, error, started_at, finished_at, created_at
 		FROM executions WHERE tenant_id = $1 AND id = $2`, tenantID, executionID).
 		Scan(&result.ID, &result.WorkflowID, &result.EventID, &result.Status, &result.Error, &result.StartedAt, &result.FinishedAt, &result.CreatedAt)
@@ -24,7 +29,7 @@ func (s *Store) GetExecution(ctx context.Context, tenantID, executionID string) 
 		return Execution{}, fmt.Errorf("get execution: %w", err)
 	}
 
-	rows, err := s.pool.Query(ctx, `
+	rows, err := tx.Query(ctx, `
 		SELECT id, step_id, step_type, status, attempt, output, error, started_at, finished_at
 		FROM step_runs WHERE tenant_id = $1 AND execution_id = $2 ORDER BY created_at, step_id`, tenantID, executionID)
 	if err != nil {
@@ -39,11 +44,36 @@ func (s *Store) GetExecution(ctx context.Context, tenantID, executionID string) 
 		}
 		result.Steps = append(result.Steps, step)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return Execution{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Execution{}, fmt.Errorf("commit get execution: %w", err)
+	}
+	return result, nil
 }
 
 func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.Duration) (Job, bool, error) {
-	if _, err := s.pool.Exec(ctx, `
+	tenants, err := s.workerTenants(ctx, &s.stepCursor)
+	if err != nil {
+		return Job{}, false, err
+	}
+	for _, tenantID := range tenants {
+		job, found, err := s.claimTenantStep(ctx, tenantID, owner, leaseDuration)
+		if err != nil || found {
+			return job, found, err
+		}
+	}
+	return Job{}, false, nil
+}
+
+func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, leaseDuration time.Duration) (Job, bool, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return Job{}, false, fmt.Errorf("begin step claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
 		WITH exhausted AS (
 			UPDATE step_runs
 			SET status = 'failed', error = 'worker lease expired after the final attempt',
@@ -58,7 +88,7 @@ func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.
 		  AND e.status IN ('queued', 'running')`); err != nil {
 		return Job{}, false, fmt.Errorf("reap exhausted step leases: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE step_runs s
 		SET status = 'cancelled', error = 'cancelled because the execution failed', finished_at = now()
 		FROM executions e
@@ -67,11 +97,6 @@ func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.
 		return Job{}, false, fmt.Errorf("cancel steps for failed executions: %w", err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Job{}, false, fmt.Errorf("begin step claim: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var job Job
 	err = tx.QueryRow(ctx, `
 		WITH candidate AS (
@@ -101,6 +126,9 @@ func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.
 			&job.Attempt, &job.MaxAttempts, &job.InitialDelaySeconds, &job.MaxDelaySeconds,
 			&job.TimeoutSeconds, &job.LeaseOwner, &job.EventPayload)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return Job{}, false, fmt.Errorf("commit step reap: %w", err)
+		}
 		return Job{}, false, nil
 	}
 	if err != nil {
@@ -118,7 +146,7 @@ func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.
 }
 
 func (s *Store) CompleteStep(ctx context.Context, job Job, output json.RawMessage) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, job.TenantID)
 	if err != nil {
 		return fmt.Errorf("begin step completion: %w", err)
 	}
@@ -219,7 +247,7 @@ func (s *Store) CompleteStep(ctx context.Context, job Job, output json.RawMessag
 }
 
 func (s *Store) FailStep(ctx context.Context, job Job, message string, retryAt *time.Time) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, job.TenantID)
 	if err != nil {
 		return fmt.Errorf("begin step failure: %w", err)
 	}
@@ -269,8 +297,13 @@ func (s *Store) FailStep(ctx context.Context, job Job, message string, retryAt *
 }
 
 func (s *Store) Analytics(ctx context.Context, tenantID string) (Analytics, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return Analytics{}, fmt.Errorf("begin analytics: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var result Analytics
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT
 			(SELECT count(*) FROM events WHERE tenant_id = $1 AND received_at >= now() - interval '24 hours'),
 			(SELECT count(*) FROM executions WHERE tenant_id = $1 AND created_at >= now() - interval '24 hours'),
@@ -281,6 +314,9 @@ func (s *Store) Analytics(ctx context.Context, tenantID string) (Analytics, erro
 		Scan(&result.Events24h, &result.Executions24h, &result.Succeeded24h, &result.Failed24h, &result.QueuedSteps, &result.OldestQueuedSeconds)
 	if err != nil {
 		return Analytics{}, fmt.Errorf("query analytics: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Analytics{}, fmt.Errorf("commit analytics: %w", err)
 	}
 	finished := result.Succeeded24h + result.Failed24h
 	if finished > 0 {

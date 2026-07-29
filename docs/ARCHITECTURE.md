@@ -4,9 +4,10 @@
 
 ### Modular monolith first
 
-Nimbus defaults to one Go process containing API and a bounded worker pool. The
-same image also runs as independent `api` and `worker` components, without
-introducing an internal network protocol or changing PostgreSQL authority.
+Nimbus remains one Go codebase and binary, while the default deployment runs
+independent `api` and `worker` components so each can use a least-privilege
+database role. This does not introduce an internal network protocol or change
+PostgreSQL authority.
 
 ### PostgreSQL is the authority
 
@@ -33,8 +34,8 @@ The `migrate` component is the only process that applies embedded migrations and
 bootstraps the initial local identity. It serializes concurrent migrators with a
 PostgreSQL advisory lock and records a SHA-256 checksum for every migration.
 API and worker processes verify that exact history at startup and fail closed;
-they do not execute DDL. This is the first boundary required before assigning
-non-owner PostgreSQL roles and adopting expand/contract releases.
+they do not execute DDL or read `schema_migrations` directly. Verification uses
+a boolean, fixed-search-path `SECURITY DEFINER` function.
 
 ## Ingestion Sequence
 
@@ -71,21 +72,34 @@ Independent ready steps can be claimed by different workers concurrently.
 - The authentication middleware places the tenant in context. Request bodies
   and path parameters never choose a tenant.
 - Every store method requires a tenant ID and every tenant table query filters it.
+- Tenant-facing store transactions use transaction-local settings only. API
+  requests carry an opaque API-key hash capability from authentication; API RLS
+  resolves that capability through an owner-only scope mirror and does not trust
+  `app.tenant_id`. Worker and owner policies use `app.tenant_id` separately.
+- API-key lookup is the only pre-tenant API operation. Fixed-search-path
+  `SECURITY DEFINER` functions resolve the owner-only scope mirror without
+  granting runtime access to API-key hashes.
+- Workers enumerate at most 100 tenant IDs through a worker-only function and
+  rotate the cursor before claiming steps or outbox rows inside one tenant.
 - The HTTP connector resolves DNS itself and refuses private, loopback,
   link-local, multicast, and unspecified addresses unless an operator explicitly
   allowlists the hostname.
 - Redirects are disabled to prevent SSRF validation bypass.
 - Bodies, headers, retries, leases, workers, and server timeouts are bounded.
 
-Fine-grained role authorization and RLS policies are present. Hosted production
-still requires OIDC membership and dedicated non-owner DB roles that establish
-`app.tenant_id` per transaction; the local schema owner bypasses RLS.
+The deployment platform must create `nimbus_api` and `nimbus_worker` before the
+owner runs migrations. Migration 005 fails clearly when either is absent, then
+grants them without requiring `CREATEROLE`, creating passwords, or granting
+`BYPASSRLS`. Compose does this only for a fresh local PostgreSQL volume with
+documented local-only credentials. The split profile uses those roles; the
+convenience monolith still uses the local owner and is not a hosted isolation
+boundary. OIDC membership remains future work.
 
 ## Evolution Gates
 
 | Change | Add only when |
 | --- | --- |
-| Keep API and worker split | Optional profile is implemented; use it when lifecycle or scaling independence is measured |
+| Separate API/worker services | Already required for database-role isolation; scale them independently only with measured need |
 | NATS JetStream | Polling latency or fan-out is a measured bottleneck; use transactional outbox |
 | Redis | Distributed rate limiting is required; never store authoritative execution state |
 | Table partitioning | Retention and query plans show material degradation |

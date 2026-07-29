@@ -60,7 +60,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Provision runtime roles
+        run: |
+          PGPASSWORD=nimbus psql -h localhost -U nimbus -d nimbus_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE nimbus_owner LOGIN PASSWORD 'nimbus-owner-test';
+          CREATE ROLE nimbus_api LOGIN PASSWORD 'nimbus-api-test';
+          CREATE ROLE nimbus_worker LOGIN PASSWORD 'nimbus-worker-test';
+          ALTER DATABASE nimbus_test OWNER TO nimbus_owner;
+          SQL
       - name: Test PostgreSQL migrations
         run: make test-integration
         env:
-          NIMBUS_TEST_DATABASE_URL: postgres://nimbus:nimbus@localhost:5432/nimbus_test?sslmode=disable
+          NIMBUS_TEST_DATABASE_URL: postgres://nimbus_owner:nimbus-owner-test@localhost:5432/nimbus_test?sslmode=disable
+          NIMBUS_TEST_API_DATABASE_URL: postgres://nimbus_api:nimbus-api-test@localhost:5432/nimbus_test?sslmode=disable
+          NIMBUS_TEST_WORKER_DATABASE_URL: postgres://nimbus_worker:nimbus-worker-test@localhost:5432/nimbus_test?sslmode=disable

@@ -18,7 +18,7 @@ func (s *Store) CreateWorkflow(ctx context.Context, actor Principal, name string
 	if err != nil {
 		return Workflow{}, fmt.Errorf("encode workflow definition: %w", err)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return Workflow{}, fmt.Errorf("begin create workflow: %w", err)
 	}
@@ -49,7 +49,12 @@ func (s *Store) CreateWorkflow(ctx context.Context, actor Principal, name string
 }
 
 func (s *Store) ListWorkflows(ctx context.Context, tenantID string) ([]Workflow, error) {
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("begin workflow list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
 		SELECT w.id, w.name, w.status, w.active_version, v.definition, w.created_at, w.updated_at, w.approval_required
 		FROM workflows w
 		JOIN workflow_versions v ON v.tenant_id = w.tenant_id
@@ -76,6 +81,9 @@ func (s *Store) ListWorkflows(ctx context.Context, tenantID string) ([]Workflow,
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate workflows: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit workflow list: %w", err)
+	}
 	return result, nil
 }
 
@@ -84,7 +92,7 @@ func (s *Store) CreateWorkflowVersion(ctx context.Context, actor Principal, work
 	if err != nil {
 		return Workflow{}, fmt.Errorf("encode workflow version: %w", err)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return Workflow{}, fmt.Errorf("begin workflow version: %w", err)
 	}
@@ -118,7 +126,7 @@ func (s *Store) CreateWorkflowVersion(ctx context.Context, actor Principal, work
 }
 
 func (s *Store) ActivateWorkflowVersion(ctx context.Context, actor Principal, workflowID string, version int) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return err
 	}
@@ -138,7 +146,7 @@ func (s *Store) ActivateWorkflowVersion(ctx context.Context, actor Principal, wo
 }
 
 func (s *Store) IngestEvent(ctx context.Context, actor Principal, workflowID, externalID, eventType string, payload json.RawMessage) (IngestResult, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return IngestResult{}, fmt.Errorf("begin event ingestion: %w", err)
 	}

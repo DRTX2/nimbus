@@ -30,6 +30,11 @@ spec:
           env:
             - name: NIMBUS_COMPONENT
               value: api
+            - name: NIMBUS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: nimbus-secrets
+                  key: NIMBUS_API_DATABASE_URL
           ports:
             - name: http
               containerPort: 8080

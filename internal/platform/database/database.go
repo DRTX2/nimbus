@@ -119,11 +119,11 @@ func VerifySchema(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
 		expected := fmt.Sprintf("%x", sha256.Sum256(contents))
-		var actual string
-		if err := pool.QueryRow(ctx, "SELECT COALESCE(checksum, '') FROM schema_migrations WHERE name = $1", entry.Name()).Scan(&actual); err != nil {
+		var valid bool
+		if err := pool.QueryRow(ctx, "SELECT public.nimbus_verify_migration($1, $2)", entry.Name(), expected).Scan(&valid); err != nil {
 			return fmt.Errorf("verify migration %s: %w", entry.Name(), err)
 		}
-		if actual != expected {
+		if !valid {
 			return fmt.Errorf("verify migration %s: checksum mismatch", entry.Name())
 		}
 	}

@@ -22,9 +22,12 @@ limitations mean this release must not host mutually untrusted tenants:
 - The one-shot migrator bootstraps one local tenant and owner key; API and worker
   processes only verify immutable migration checksums. Additional API keys are
   hashed, expiring, revocable, role-bound, and do not reactivate after revocation.
-- RBAC, separation-of-duty approvals, audit events, and tenant RLS policies exist.
-  Current deployments use the schema owner, so RLS is not an active boundary
-  until dedicated API/worker roles set tenant context per transaction.
+- Compose and Kubernetes support distinct non-owner API and worker database
+  roles. Tenant tables force RLS; API policy resolves an opaque authenticated
+  key capability rather than trusting a tenant setting, while worker tenant
+  context remains transaction-local. Runtime roles cannot alter audit events or
+  read migration metadata directly. Production operators must provision those roles
+  before migration; Nimbus never creates roles or embeds production passwords.
 - OIDC/JWKS and a general encrypted connector secret provider are not implemented.
   AWS AssumeRole external IDs are resolved indirectly from an environment reference.
 - The AWS sandbox is single-node and exposes the app only through an SSM tunnel.

@@ -310,9 +310,15 @@ func authenticate(repository *store.Store, logger *slog.Logger) func(http.Handle
 				next.ServeHTTP(response, request)
 				return
 			}
-			token := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
-			principal, err := repository.AuthenticateAPIKey(request.Context(), token)
-			if token == "" || err != nil {
+			token, validAuthorization := bearerToken(request.Header.Get("Authorization"))
+			if !validAuthorization {
+				response.Header().Set("Content-Type", "application/problem+json")
+				response.WriteHeader(http.StatusUnauthorized)
+				_, _ = response.Write([]byte(`{"title":"Unauthorized","status":401,"detail":"a valid bearer token is required"}`))
+				return
+			}
+			principal, capability, err := repository.AuthenticateAPIKey(request.Context(), token)
+			if err != nil {
 				if err != nil && !errors.Is(err, store.ErrForbidden) {
 					logger.Error("authentication failed", "error", err)
 				}
@@ -322,9 +328,18 @@ func authenticate(repository *store.Store, logger *slog.Logger) func(http.Handle
 				return
 			}
 			ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
+			ctx = store.WithTenantCapability(ctx, capability)
 			next.ServeHTTP(response, request.WithContext(ctx))
 		})
 	}
+}
+
+func bearerToken(value string) (string, bool) {
+	parts := strings.Fields(value)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
 }
 
 func principalFrom(ctx context.Context) store.Principal {

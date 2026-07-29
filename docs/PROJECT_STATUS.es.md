@@ -111,9 +111,8 @@ revocado.
   que el lease.
 - El check AWS es manual en la beta; no hay scheduler automatico con presupuesto.
 - No hay descubrimiento automatico de topologias AWS.
-- RLS esta definido pero los perfiles locales usan el propietario del esquema,
-  que lo omite. No es una frontera activa hasta separar roles DB y establecer
-  tenant context por transaccion.
+- RLS se fuerza con roles locales no propietarios para API y worker y contexto
+  tenant transaccional. Produccion debe provisionar esos roles antes de migrar.
 - No hay OIDC/JWKS, SCIM ni lifecycle empresarial de memberships.
 - No hay proveedor general de secretos ni firma HMAC de webhooks.
 - Analytics actual es operacional de 24 horas, no un BI historico.
@@ -125,8 +124,6 @@ revocado.
 ### Prioridad 1: Hosted Security
 
 - OIDC/JWKS con issuer, audience, algoritmos y cache acotados.
-- Roles PostgreSQL `migrator`, `api` y `worker` no propietarios.
-- Contexto tenant transaccional y pruebas RLS negativas reales.
 - Secret references en AWS SSM/Secrets Manager.
 - Webhooks firmados, rotacion y ventana antireplay.
 - Cuotas de ingestion, concurrencia y llamadas AWS por tenant.
