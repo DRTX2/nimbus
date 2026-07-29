@@ -24,6 +24,15 @@ jobs:
           languages: go
       - name: Analyze
         uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          output: codeql-results
+          upload: never
+      - name: Upload CodeQL results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codeql-results
+          path: codeql-results
+          retention-days: 14
 
   trivy:
     runs-on: ubuntu-latest
@@ -32,13 +41,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Scan repository
-        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808 # v0.33.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+        run: >-
+          docker run --rm
+          -v "${{ github.workspace }}:/workspace"
+          aquasec/trivy@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436
+          fs --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 /workspace
 
   dependency-review:
     if: github.event_name == 'pull_request'
