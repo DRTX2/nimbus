@@ -15,6 +15,7 @@ lector pueda encontrar informacion sin recorrer todo el repositorio.
 | [`PRODUCT.md`](PRODUCT.md) | Problema, cliente objetivo, diferenciacion y modelo comercial |
 | [`PHASES_4_6.md`](PHASES_4_6.md) | Demo de producto, gobernanza y separacion API/worker |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Despliegue local, Kubernetes y sandbox AWS |
+| [`SRE_OPERATIONS.md`](SRE_OPERATIONS.md) | Senales PostgreSQL, alertas beta y diagnostico inicial de colas/outbox |
 | [`LEARNING_GUIDE.es.md`](LEARNING_GUIDE.es.md) | Recorrido pedagogico para estudiar el codigo |
 
 ## Fuente De Verdad

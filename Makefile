@@ -1,4 +1,4 @@
-.PHONY: fmt vet test test-race test-integration build verify security dev dev-split dev-down logs clean
+.PHONY: fmt vet test test-race test-integration build verify security observability validate-deploy dev dev-split dev-down logs clean
 
 fmt:
 	gofmt -w .
@@ -24,6 +24,16 @@ verify: fmt vet test test-race build
 
 security:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+observability:
+	docker run --rm --entrypoint promtool -v "$(CURDIR)/deploy/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 check config /etc/prometheus/prometheus.yml
+	docker run --rm --entrypoint promtool -v "$(CURDIR)/deploy/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 check config /etc/prometheus/prometheus-split.yml
+	docker run --rm --entrypoint promtool -v "$(CURDIR)/deploy/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 test rules /etc/prometheus/nimbus.rules.test.yml
+
+validate-deploy:
+	docker compose config --quiet
+	docker compose -f compose.yaml -f compose.split.yaml config --quiet
+	kubectl kustomize deploy/k8s/base >/dev/null
 
 dev:
 	docker compose up --build --detach --wait --remove-orphans

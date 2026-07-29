@@ -72,6 +72,8 @@ opt-in y read-only. No se ha creado infraestructura cloud real.
 - Outbox transaccional con lease, retry, fencing e idempotency key.
 - API y worker escalables por separado.
 - Polling como fallback de correccion, sin broker obligatorio.
+- Gauges PostgreSQL de backlog ejecutable, edad, leases expirados y outbox;
+  reglas Prometheus con pruebas `promtool` y alerta de frescura.
 - Contenedores no root, filesystem read-only y capacidades eliminadas.
 - Puertos locales ligados a `127.0.0.1`.
 - Terraform sandbox sin ingress, administrado por SSM.
@@ -151,7 +153,8 @@ revocado.
 
 - RDS, TLS, backups y restore drills.
 - Migraciones como job separado con estrategia expand/contract.
-- SLOs y alertas de backlog, outbox y edad del trabajo.
+- Validar con carga los umbrales iniciales de backlog/outbox y convertirlos en
+  SLOs con error budgets basados en evidencia.
 - Pruebas PostgreSQL concurrentes, E2E y carga sostenida.
 - SBOM, provenance de release y publicacion por SHA.
 - Runbooks de incidentes, rollback y disaster recovery.

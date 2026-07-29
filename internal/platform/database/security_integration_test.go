@@ -122,7 +122,127 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 	if !found || job.TenantID != tenantA {
 		t.Fatalf("worker claim found=%v tenant=%q, want tenant %q", found, job.TenantID, tenantA)
 	}
+	assertOperationalQueueMetrics(t, ctx, owner, worker, api, tenantA, job.ExecutionID)
 	assertWorkerTenantLimit(t, ctx, owner, worker)
+}
+
+func assertOperationalQueueMetrics(t *testing.T, ctx context.Context, owner, worker, api *pgxpool.Pool, tenantID, executionID string) {
+	t.Helper()
+	workerStore := store.New(worker)
+	before, err := workerStore.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("query baseline operational metrics as worker: %v", err)
+	}
+	tx, err := owner.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO step_runs
+		(tenant_id,execution_id,step_id,step_type,status,attempt,max_attempts,initial_delay_seconds,max_delay_seconds,timeout_seconds,available_at,lease_owner,lease_until)
+		VALUES
+		($1,$2,'metrics-due','noop','queued',0,3,1,5,5,now() - interval '2 seconds',NULL,NULL),
+		($1,$2,'metrics-delayed','noop','queued',1,3,1,5,5,now() + interval '1 hour',NULL,NULL),
+		($1,$2,'metrics-expired','noop','running',1,3,1,5,5,now() - interval '1 hour','expired-worker',now() - interval '2 seconds')`, tenantID, executionID); err != nil {
+		t.Fatalf("seed operational steps: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO outbox_messages
+		(tenant_id,topic,aggregate_type,aggregate_id,payload,idempotency_key,available_at,attempt,max_attempts,lease_owner,lease_until)
+		VALUES
+		($1,'metrics','test',$2,'{}',gen_random_uuid()::text,now() - interval '2 seconds',0,3,NULL,NULL),
+		($1,'metrics','test',$2,'{}',gen_random_uuid()::text,now() + interval '1 hour',1,3,NULL,NULL),
+		($1,'metrics','test',$2,'{}',gen_random_uuid()::text,now() - interval '1 hour',3,3,NULL,NULL)`, tenantID, executionID); err != nil {
+		t.Fatalf("seed operational outbox: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit operational fixtures: %v", err)
+	}
+	defer cleanupOperationalFixtures(t, ctx, owner, tenantID, executionID)
+
+	after, err := workerStore.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("query operational metrics as worker: %v", err)
+	}
+	if after.RunnableSteps != before.RunnableSteps+2 {
+		t.Fatalf("runnable steps delta = %d, want 2; delayed retry must be excluded", after.RunnableSteps-before.RunnableSteps)
+	}
+	if after.OldestRunnableStepAgeSeconds < 0 {
+		t.Fatalf("oldest runnable age = %f, want non-negative", after.OldestRunnableStepAgeSeconds)
+	}
+	if after.ExpiredStepLeases != before.ExpiredStepLeases+1 {
+		t.Fatalf("expired lease delta = %d, want 1", after.ExpiredStepLeases-before.ExpiredStepLeases)
+	}
+	if after.PublishableOutboxMessages != before.PublishableOutboxMessages+1 {
+		t.Fatalf("publishable outbox delta = %d, want 1; delayed retry and exhausted message must be excluded", after.PublishableOutboxMessages-before.PublishableOutboxMessages)
+	}
+	if after.OldestPublishableOutboxAgeSeconds < 0 {
+		t.Fatalf("oldest publishable outbox age = %f, want non-negative", after.OldestPublishableOutboxAgeSeconds)
+	}
+	if after.ExhaustedUnpublishedOutboxMessages != before.ExhaustedUnpublishedOutboxMessages+1 {
+		t.Fatalf("exhausted outbox delta = %d, want 1", after.ExhaustedUnpublishedOutboxMessages-before.ExhaustedUnpublishedOutboxMessages)
+	}
+	ownerSnapshot, err := store.New(owner).OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("query operational metrics as migration owner: %v", err)
+	}
+	if ownerSnapshot.RunnableSteps != after.RunnableSteps ||
+		ownerSnapshot.ExpiredStepLeases != after.ExpiredStepLeases ||
+		ownerSnapshot.PublishableOutboxMessages != after.PublishableOutboxMessages ||
+		ownerSnapshot.ExhaustedUnpublishedOutboxMessages != after.ExhaustedUnpublishedOutboxMessages {
+		t.Fatalf("migration owner aggregate differs from worker: owner=%+v worker=%+v", ownerSnapshot, after)
+	}
+	if _, err := api.Exec(ctx, "SELECT * FROM public.nimbus_operational_queue_metrics()"); err == nil {
+		t.Fatal("API role executed worker-only operational metrics function")
+	}
+	var ownerIsMigrator, publicCanExecute bool
+	if err := owner.QueryRow(ctx, `SELECT pg_get_userbyid(p.proowner) = current_user,
+		has_function_privilege('public', 'public.nimbus_operational_queue_metrics()', 'EXECUTE')
+		FROM pg_proc p WHERE p.oid = 'public.nimbus_operational_queue_metrics()'::regprocedure`).Scan(&ownerIsMigrator, &publicCanExecute); err != nil {
+		t.Fatalf("inspect operational function privileges: %v", err)
+	}
+	if !ownerIsMigrator || publicCanExecute {
+		t.Fatalf("operational function owner/public execute = %v/%v, want true/false", ownerIsMigrator, publicCanExecute)
+	}
+}
+
+func cleanupOperationalFixtures(t *testing.T, ctx context.Context, owner *pgxpool.Pool, tenantID, executionID string) {
+	t.Helper()
+	tx, err := owner.Begin(ctx)
+	if err != nil {
+		t.Errorf("begin operational fixture cleanup: %v", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID); err != nil {
+		t.Errorf("scope operational fixture cleanup: %v", err)
+		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM outbox_messages
+		WHERE tenant_id=$1 AND aggregate_type='test' AND aggregate_id=$2`, tenantID, executionID); err != nil {
+		t.Errorf("clean operational outbox fixtures: %v", err)
+		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM step_runs
+		WHERE tenant_id=$1 AND execution_id=$2 AND step_id LIKE 'metrics-%'`, tenantID, executionID); err != nil {
+		t.Errorf("clean operational step fixtures: %v", err)
+		return
+	}
+	if _, err := tx.Exec(ctx, `UPDATE step_runs SET status='succeeded', lease_owner=NULL, lease_until=NULL, finished_at=now()
+		WHERE tenant_id=$1 AND execution_id=$2 AND status IN ('queued','running')`, tenantID, executionID); err != nil {
+		t.Errorf("finish claim fixture: %v", err)
+		return
+	}
+	if _, err := tx.Exec(ctx, `UPDATE executions SET status='succeeded', finished_at=now()
+		WHERE tenant_id=$1 AND id=$2 AND status IN ('queued','running')`, tenantID, executionID); err != nil {
+		t.Errorf("finish claim execution fixture: %v", err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Errorf("commit operational fixture cleanup: %v", err)
+	}
 }
 
 func assertIncidentQualityLoop(t *testing.T, ctx context.Context, owner, worker *pgxpool.Pool, apiStore *store.Store, apiCtx context.Context, actor store.Principal, tenantA, tenantB string) {

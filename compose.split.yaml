@@ -44,3 +44,7 @@ services:
     tmpfs: ["/tmp:size=16m,noexec,nosuid"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+
+  prometheus:
+    volumes:
+      - ./deploy/observability/prometheus-split.yml:/etc/prometheus/prometheus.yml:ro

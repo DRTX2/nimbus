@@ -75,6 +75,7 @@ services:
       - --storage.tsdb.retention.time=3d
     volumes:
       - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/nimbus.rules.yml:/etc/prometheus/nimbus.rules.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"

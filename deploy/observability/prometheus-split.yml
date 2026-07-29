@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - /etc/prometheus/nimbus.rules.yml
+
+scrape_configs:
+  - job_name: nimbus-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["nimbus-api:8080"]
+  - job_name: nimbus-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["nimbus-worker:8081"]

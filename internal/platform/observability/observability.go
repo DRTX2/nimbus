@@ -16,14 +16,21 @@ import (
 )
 
 type Metrics struct {
-	EventsAccepted  prometheus.Counter
-	EventsDuplicate prometheus.Counter
-	StepsCompleted  *prometheus.CounterVec
-	StepDuration    *prometheus.HistogramVec
-	registry        *prometheus.Registry
+	EventsAccepted                     prometheus.Counter
+	EventsDuplicate                    prometheus.Counter
+	StepsCompleted                     *prometheus.CounterVec
+	StepDuration                       *prometheus.HistogramVec
+	RunnableSteps                      prometheus.Gauge
+	OldestRunnableStepAgeSeconds       prometheus.Gauge
+	ExpiredStepLeases                  prometheus.Gauge
+	PublishableOutboxMessages          prometheus.Gauge
+	OldestPublishableOutboxAgeSeconds  prometheus.Gauge
+	ExhaustedUnpublishedOutboxMessages prometheus.Gauge
+	OperationalMetricsLastSuccess      prometheus.Gauge
+	registry                           *prometheus.Registry
 }
 
-func NewMetrics() *Metrics {
+func NewMetrics(enableOperational bool) *Metrics {
 	registry := prometheus.NewRegistry()
 	metrics := &Metrics{
 		EventsAccepted: prometheus.NewCounter(prometheus.CounterOpts{
@@ -39,9 +46,35 @@ func NewMetrics() *Metrics {
 			Namespace: "nimbus", Name: "step_duration_seconds", Help: "Step execution duration.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"type"}),
+		RunnableSteps: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "runnable_steps", Help: "PostgreSQL-authoritative steps runnable now, including reclaimable expired leases.",
+		}),
+		OldestRunnableStepAgeSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "oldest_runnable_step_age_seconds", Help: "Non-negative age of the oldest step runnable now.",
+		}),
+		ExpiredStepLeases: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "expired_step_leases", Help: "PostgreSQL-authoritative running step leases past their expiry.",
+		}),
+		PublishableOutboxMessages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "publishable_outbox_messages", Help: "PostgreSQL-authoritative unpublished outbox messages publishable now.",
+		}),
+		OldestPublishableOutboxAgeSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "oldest_publishable_outbox_age_seconds", Help: "Non-negative age of the oldest outbox message publishable now.",
+		}),
+		ExhaustedUnpublishedOutboxMessages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "exhausted_unpublished_outbox_messages", Help: "PostgreSQL-authoritative unpublished outbox messages with no attempts remaining.",
+		}),
+		OperationalMetricsLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "nimbus", Name: "operational_metrics_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful PostgreSQL operational metrics refresh.",
+		}),
 		registry: registry,
 	}
 	registry.MustRegister(metrics.EventsAccepted, metrics.EventsDuplicate, metrics.StepsCompleted, metrics.StepDuration)
+	if enableOperational {
+		registry.MustRegister(metrics.RunnableSteps, metrics.OldestRunnableStepAgeSeconds, metrics.ExpiredStepLeases,
+			metrics.PublishableOutboxMessages, metrics.OldestPublishableOutboxAgeSeconds,
+			metrics.ExhaustedUnpublishedOutboxMessages, metrics.OperationalMetricsLastSuccess)
+	}
 	return metrics
 }
 

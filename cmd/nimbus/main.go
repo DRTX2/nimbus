@@ -72,14 +72,17 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
-	metrics := observability.NewMetrics()
+	runsWorkers := cfg.Component == "all" || cfg.Component == "worker"
+	metrics := observability.NewMetrics(runsWorkers)
 	var workers sync.WaitGroup
-	if cfg.Component == "all" || cfg.Component == "worker" {
+	if runsWorkers {
 		worker := execution.NewWorker(repository, logger, metrics, cfg.WorkerCount, cfg.PollInterval, cfg.LeaseDuration, cfg.OutboundAllowedHosts)
 		publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
-		workers.Add(2)
+		operationalMetrics := observability.NewOperationalRefresher(repository, metrics, logger, cfg.OperationalMetricsInterval)
+		workers.Add(3)
 		go func() { defer workers.Done(); worker.Run(rootCtx) }()
 		go func() { defer workers.Done(); publisher.Run(rootCtx) }()
+		go func() { defer workers.Done(); operationalMetrics.Run(rootCtx) }()
 	}
 	handler := httpapi.NewOperational(repository, metrics, logger)
 	if cfg.Component == "all" || cfg.Component == "api" {

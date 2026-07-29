@@ -1,0 +1,66 @@
+groups:
+  - name: nimbus-operational
+    rules:
+      - record: nimbus:runnable_steps:max
+        expr: max(nimbus_runnable_steps)
+      - record: nimbus:oldest_runnable_step_age_seconds:max
+        expr: max(nimbus_oldest_runnable_step_age_seconds)
+      - record: nimbus:expired_step_leases:max
+        expr: max(nimbus_expired_step_leases)
+      - record: nimbus:publishable_outbox_messages:max
+        expr: max(nimbus_publishable_outbox_messages)
+      - record: nimbus:oldest_publishable_outbox_age_seconds:max
+        expr: max(nimbus_oldest_publishable_outbox_age_seconds)
+      - record: nimbus:exhausted_unpublished_outbox_messages:max
+        expr: max(nimbus_exhausted_unpublished_outbox_messages)
+      - record: nimbus:operational_metrics_last_success_timestamp_seconds:max
+        expr: max(nimbus_operational_metrics_last_success_timestamp_seconds)
+
+      - alert: NimbusRunnableStepBacklogHigh
+        expr: nimbus:runnable_steps:max > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nimbus runnable step backlog exceeds the initial beta target
+          runbook_url: docs/SRE_OPERATIONS.md#runnable-step-backlog
+      - alert: NimbusRunnableStepOld
+        expr: nimbus:runnable_steps:max > 0 and nimbus:oldest_runnable_step_age_seconds:max > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nimbus runnable step work is older than the initial beta target
+          runbook_url: docs/SRE_OPERATIONS.md#runnable-step-backlog
+      - alert: NimbusPublishableOutboxOld
+        expr: nimbus:publishable_outbox_messages:max > 0 and nimbus:oldest_publishable_outbox_age_seconds:max > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nimbus publishable outbox work is older than the initial beta target
+          runbook_url: docs/SRE_OPERATIONS.md#outbox-publication
+      - alert: NimbusExpiredStepLeases
+        expr: nimbus:expired_step_leases:max > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nimbus has sustained expired running step leases
+          runbook_url: docs/SRE_OPERATIONS.md#expired-step-leases
+      - alert: NimbusExhaustedUnpublishedOutbox
+        expr: nimbus:exhausted_unpublished_outbox_messages:max > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Nimbus has unpublished outbox messages with no attempts remaining
+          runbook_url: docs/SRE_OPERATIONS.md#exhausted-outbox
+      - alert: NimbusOperationalMetricsStale
+        expr: time() - nimbus:operational_metrics_last_success_timestamp_seconds:max > 120 or absent(nimbus_operational_metrics_last_success_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Nimbus operational queue metrics are stale or absent
+          runbook_url: docs/SRE_OPERATIONS.md#stale-or-absent-metrics

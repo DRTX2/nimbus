@@ -1,0 +1,101 @@
+rule_files:
+  - nimbus.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: nimbus_runnable_steps{job="nimbus-worker",instance="worker:8081"}
+        values: 101x16
+      - series: nimbus_oldest_runnable_step_age_seconds{job="nimbus-worker",instance="worker:8081"}
+        values: 301x16
+      - series: nimbus_publishable_outbox_messages{job="nimbus-worker",instance="worker:8081"}
+        values: 1x16
+      - series: nimbus_oldest_publishable_outbox_age_seconds{job="nimbus-worker",instance="worker:8081"}
+        values: 301x16
+      - series: nimbus_expired_step_leases{job="nimbus-worker",instance="worker:8081"}
+        values: 1x16
+      - series: nimbus_exhausted_unpublished_outbox_messages{job="nimbus-worker",instance="worker:8081"}
+        values: 1x16
+      - series: nimbus_operational_metrics_last_success_timestamp_seconds{job="nimbus-worker",instance="worker:8081"}
+        values: 0x16
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NimbusRunnableStepBacklogHigh
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Nimbus runnable step backlog exceeds the initial beta target
+              runbook_url: docs/SRE_OPERATIONS.md#runnable-step-backlog
+      - eval_time: 15m
+        alertname: NimbusRunnableStepOld
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Nimbus runnable step work is older than the initial beta target
+              runbook_url: docs/SRE_OPERATIONS.md#runnable-step-backlog
+      - eval_time: 15m
+        alertname: NimbusPublishableOutboxOld
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Nimbus publishable outbox work is older than the initial beta target
+              runbook_url: docs/SRE_OPERATIONS.md#outbox-publication
+      - eval_time: 15m
+        alertname: NimbusExpiredStepLeases
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Nimbus has sustained expired running step leases
+              runbook_url: docs/SRE_OPERATIONS.md#expired-step-leases
+      - eval_time: 15m
+        alertname: NimbusExhaustedUnpublishedOutbox
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: Nimbus has unpublished outbox messages with no attempts remaining
+              runbook_url: docs/SRE_OPERATIONS.md#exhausted-outbox
+      - eval_time: 15m
+        alertname: NimbusOperationalMetricsStale
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: Nimbus operational queue metrics are stale or absent
+              runbook_url: docs/SRE_OPERATIONS.md#stale-or-absent-metrics
+
+  - interval: 1m
+    input_series:
+      - series: nimbus_runnable_steps{job="nimbus-worker"}
+        values: 100x16
+      - series: nimbus_oldest_runnable_step_age_seconds{job="nimbus-worker"}
+        values: 300x16
+      - series: nimbus_publishable_outbox_messages{job="nimbus-worker"}
+        values: 1x16
+      - series: nimbus_oldest_publishable_outbox_age_seconds{job="nimbus-worker"}
+        values: 300x16
+      - series: nimbus_expired_step_leases{job="nimbus-worker"}
+        values: 0x16
+      - series: nimbus_exhausted_unpublished_outbox_messages{job="nimbus-worker"}
+        values: 0x16
+      - series: nimbus_operational_metrics_last_success_timestamp_seconds{job="nimbus-worker"}
+        values: 900x16
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NimbusRunnableStepBacklogHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NimbusRunnableStepOld
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NimbusPublishableOutboxOld
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NimbusExpiredStepLeases
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NimbusExhaustedUnpublishedOutbox
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NimbusOperationalMetricsStale
+        exp_alerts: []

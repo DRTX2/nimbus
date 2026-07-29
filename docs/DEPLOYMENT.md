@@ -13,6 +13,11 @@ hosted database boundary; use the split profile for RLS validation. Use
 `docker compose down -v` deletes local data and is intentionally not a Make
 target.
 
+Prometheus uses profile-specific scrape configuration: the monolith profile
+scrapes `nimbus:8080`, while the split override scrapes both `nimbus-api:8080`
+and `nimbus-worker:8081`. Operational queue alert definitions and runbooks are
+documented in [SRE_OPERATIONS.md](SRE_OPERATIONS.md).
+
 The init script does not run again for an existing PostgreSQL volume. Provision
 the two roles explicitly before upgrading such a volume; do not delete an active
 volume to force initialization.
