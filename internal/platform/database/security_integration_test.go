@@ -104,6 +104,7 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 		t.Fatal("API capability bypassed the explicit tenant predicate")
 	}
 	assertRuntimeRestrictions(t, ctx, api, worker, tenantA)
+	assertIncidentQualityLoop(t, ctx, owner, worker, apiStore, apiCtx, principal, tenantA, tenantB)
 
 	seedClaimableStep(t, ctx, owner, tenantA, workflowA)
 	workerStore := store.New(worker)
@@ -122,6 +123,125 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 		t.Fatalf("worker claim found=%v tenant=%q, want tenant %q", found, job.TenantID, tenantA)
 	}
 	assertWorkerTenantLimit(t, ctx, owner, worker)
+}
+
+func assertIncidentQualityLoop(t *testing.T, ctx context.Context, owner, worker *pgxpool.Pool, apiStore *store.Store, apiCtx context.Context, actor store.Principal, tenantA, tenantB string) {
+	t.Helper()
+	pipelineA, err := apiStore.CreatePipeline(apiCtx, actor, store.Pipeline{
+		Name: "Quality A", Mode: "fixture", Region: "us-east-1", QueueARN: "arn:test:quality-a:queue",
+		LambdaARN: "arn:test:quality-a:lambda", DLQARN: "arn:test:quality-a:dlq",
+	})
+	if err != nil {
+		t.Fatalf("create quality pipeline A: %v", err)
+	}
+	ownerStore := store.New(owner)
+	pipelineB, err := ownerStore.CreatePipeline(ctx, store.Principal{ID: randomUUID(t, ctx, owner), TenantID: tenantB}, store.Pipeline{
+		Name: "Quality B", Mode: "fixture", Region: "us-east-1", QueueARN: "arn:test:quality-b:queue",
+		LambdaARN: "arn:test:quality-b:lambda", DLQARN: "arn:test:quality-b:dlq",
+	})
+	if err != nil {
+		t.Fatalf("create quality pipeline B: %v", err)
+	}
+	now := time.Now().UTC()
+	daysSinceMonday := (int(now.Weekday()) + 6) % 7
+	weekStart := time.Date(now.Year(), now.Month(), now.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC)
+	weekEnd := weekStart.AddDate(0, 0, 7)
+	incidentIDs := make([]string, 5)
+	for index := range incidentIDs {
+		incidentIDs[index] = insertQualityIncident(t, ctx, owner, tenantA, pipelineA.ID, "consumer_stalled", weekStart.Add(time.Duration(index+1)*time.Hour))
+	}
+	otherTenantIncident := insertQualityIncident(t, ctx, owner, tenantB, pipelineB.ID, "consumer_stalled", weekStart.Add(time.Hour))
+
+	if _, err := apiStore.ReviewIncident(apiCtx, actor, otherTenantIncident, "false_positive", "cross tenant"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cross-tenant review error = %v, want not found", err)
+	}
+	for _, review := range []struct {
+		incidentID  string
+		disposition string
+	}{
+		{incidentIDs[0], "false_positive"},
+		{incidentIDs[0], "true_positive"},
+		{incidentIDs[1], "false_positive"},
+		{incidentIDs[2], "expected_behavior"},
+		{incidentIDs[3], "duplicate"},
+	} {
+		if _, err := apiStore.ReviewIncident(apiCtx, actor, review.incidentID, review.disposition, "integration review"); err != nil {
+			t.Fatalf("review incident as %s: %v", review.disposition, err)
+		}
+	}
+	if _, err := apiStore.ReviewIncident(apiCtx, actor, incidentIDs[3], "duplicate", "integration review"); err != nil {
+		t.Fatalf("retry identical incident review: %v", err)
+	}
+
+	items, err := apiStore.WeeklyIncidentQuality(apiCtx, tenantA, weekStart, weekEnd)
+	if err != nil {
+		t.Fatalf("weekly incident quality: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("weekly groups = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item.PipelineID != pipelineA.ID || item.Total != 5 || item.Reviewed != 4 || item.Unreviewed != 1 ||
+		item.FalsePositives != 1 || item.TruePositives != 1 || item.ExpectedBehavior != 1 || item.Duplicates != 1 || item.FalsePositiveRate != 0.5 {
+		t.Fatalf("unexpected weekly quality item: %+v", item)
+	}
+
+	listed, err := apiStore.ListIncidents(apiCtx, tenantA)
+	if err != nil {
+		t.Fatalf("list reviewed incidents: %v", err)
+	}
+	var latest *store.IncidentReview
+	for _, incident := range listed {
+		if incident.ID == incidentIDs[0] {
+			latest = incident.Review
+		}
+	}
+	if latest == nil || latest.Disposition != "true_positive" {
+		t.Fatalf("latest reclassification = %+v, want true_positive", latest)
+	}
+
+	tx, err := owner.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, _ = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantA)
+	var reviews, reviewAudits, reclassificationAudits int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM incident_reviews WHERE tenant_id=$1 AND incident_id=ANY($2::uuid[])`, tenantA, incidentIDs).Scan(&reviews); err != nil {
+		t.Fatalf("count incident reviews: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='incident.review'),count(*) FILTER (WHERE action='incident.reclassify')
+		FROM audit_events WHERE tenant_id=$1 AND resource_id=ANY($2::text[])`, tenantA, incidentIDs).Scan(&reviewAudits, &reclassificationAudits); err != nil {
+		t.Fatalf("count incident review audits: %v", err)
+	}
+	if reviews != 5 || reviewAudits != 4 || reclassificationAudits != 1 {
+		t.Fatalf("review history/audits = %d/%d/%d, want 5/4/1", reviews, reviewAudits, reclassificationAudits)
+	}
+	if _, err := worker.Exec(ctx, `INSERT INTO incident_reviews (tenant_id,incident_id,revision,disposition,reviewer_principal_id)
+		VALUES ($1,$2,99,'true_positive',$3)`, tenantA, incidentIDs[4], actor.ID); err == nil {
+		t.Fatal("worker role inserted an incident review")
+	}
+}
+
+func insertQualityIncident(t *testing.T, ctx context.Context, owner *pgxpool.Pool, tenantID, pipelineID, detector string, openedAt time.Time) string {
+	t.Helper()
+	tx, err := owner.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, _ = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID)
+	var id string
+	if err := tx.QueryRow(ctx, `INSERT INTO incidents
+		(tenant_id,pipeline_id,detector,status,fingerprint,severity,summary,evidence,opened_at,recovered_at)
+		VALUES ($1,$2,$3,'recovered',gen_random_uuid()::text,'warning','quality fixture','{}',$4,$4) RETURNING id`,
+		tenantID, pipelineID, detector, openedAt).Scan(&id); err != nil {
+		t.Fatalf("insert quality incident: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit quality incident: %v", err)
+	}
+	return id
 }
 
 func requiredEnv(t *testing.T, name string) string {

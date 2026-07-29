@@ -362,7 +362,7 @@ func roleAllows(role, permission string) bool {
 		return true
 	}
 	allowed := map[string]map[string]bool{
-		"operator": {"workflow:read": true, "workflow:write": true, "event:write": true, "execution:read": true, "analytics:read": true, "pipeline:read": true, "pipeline:write": true, "incident:read": true, "incident:ack": true, "approval:read": true},
+		"operator": {"workflow:read": true, "workflow:write": true, "event:write": true, "execution:read": true, "analytics:read": true, "pipeline:read": true, "pipeline:write": true, "incident:read": true, "incident:ack": true, "incident:classify": true, "approval:read": true},
 		"approver": {"workflow:read": true, "execution:read": true, "incident:read": true, "approval:read": true, "approval:decide": true, "analytics:read": true},
 		"viewer":   {"workflow:read": true, "execution:read": true, "analytics:read": true, "pipeline:read": true, "incident:read": true, "approval:read": true},
 	}

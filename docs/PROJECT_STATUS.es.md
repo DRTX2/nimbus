@@ -47,6 +47,10 @@ opt-in y read-only. No se ha creado infraestructura cloud real.
 - Ventanas consecutivas antes de abrir o recuperar.
 - Un incidente activo por pipeline/detector.
 - Acknowledgement, recovery, evidencia y timeline persistido.
+- Revision append-only con disposiciones acotadas, reviewer, timestamp,
+  comentario opcional y audit event por clasificacion o reclasificacion.
+- Reporte semanal UTC por pipeline/detector con cobertura de revision, conteos
+  de disposiciones y tasa de falsos positivos sobre true/false positives.
 - Outbox `incident.opened` que puede iniciar un workflow de notificacion.
 
 ### Gobernanza
@@ -81,6 +85,7 @@ opt-in y read-only. No se ha creado infraestructura cloud real.
 | Crear pipelines y observaciones | Si | Si | No | No |
 | Leer incidentes | Si | Si | Si | Si |
 | Reconocer incidentes | Si | Si | No | No |
+| Clasificar/reclasificar incidentes | Si | Si | No | No |
 | Leer approvals | Si | Si | Si | Si |
 | Decidir approvals | Si, salvo propios | No | Si, salvo propios | No |
 | Gestionar API keys | Si | No | No | No |
@@ -116,8 +121,12 @@ revocado.
 - No hay OIDC/JWKS, SCIM ni lifecycle empresarial de memberships.
 - No hay proveedor general de secretos ni firma HMAC de webhooks.
 - Analytics actual es operacional de 24 horas, no un BI historico.
+- El reporte de calidad cubre como maximo 52 semanas hacia atras y no sustituye
+  entrevistas, resultados operativos de clientes ni validacion comercial.
 - No hay UI de producto; Scalar es la interfaz de demostracion.
 - No hay despliegue AWS real, dominio, TLS publico ni SLA demostrado.
+- No se han realizado entrevistas con clientes ni existen design partners
+  reales; esas cifras siguen siendo objetivos de validacion.
 
 ## Fases Pendientes
 
@@ -131,7 +140,8 @@ revocado.
 ### Prioridad 2: Validacion Comercial
 
 - Entrevistar cinco equipos y operar con tres design partners.
-- Medir falsos positivos por pipeline/semana.
+- Usar el reporte semanal implementado para medir calidad durante pruebas reales
+  y acordar umbrales de aceptacion con participantes.
 - Scheduler CloudWatch con presupuesto de llamadas y jitter.
 - Descubrimiento read-only de event source mappings.
 - Notificaciones Slack/Teams sobre el mismo contrato de delivery.

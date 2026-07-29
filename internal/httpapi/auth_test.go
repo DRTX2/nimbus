@@ -1,6 +1,9 @@
 package httpapi
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestRoleAllows(t *testing.T) {
 	tests := []struct {
@@ -9,14 +12,27 @@ func TestRoleAllows(t *testing.T) {
 	}{
 		{role: "owner", permission: "identity:write", want: true},
 		{role: "operator", permission: "pipeline:write", want: true},
+		{role: "operator", permission: "incident:classify", want: true},
 		{role: "operator", permission: "approval:decide", want: false},
 		{role: "approver", permission: "approval:decide", want: true},
+		{role: "approver", permission: "incident:classify", want: false},
+		{role: "viewer", permission: "incident:classify", want: false},
 		{role: "viewer", permission: "workflow:write", want: false},
 	}
 	for _, test := range tests {
 		if got := roleAllows(test.role, test.permission); got != test.want {
 			t.Fatalf("roleAllows(%q, %q) = %v, want %v", test.role, test.permission, got, test.want)
 		}
+	}
+}
+
+func TestWeekBoundsUTC(t *testing.T) {
+	now := time.Date(2026, time.July, 29, 23, 30, 0, 0, time.FixedZone("test", -7*60*60))
+	start, end := weekBoundsUTC(now, 1)
+	wantStart := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
+	wantEnd := time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
+	if !start.Equal(wantStart) || !end.Equal(wantEnd) {
+		t.Fatalf("week bounds = [%s, %s), want [%s, %s)", start, end, wantStart, wantEnd)
 	}
 }
 

@@ -99,7 +99,30 @@ type Incident struct {
 	AcknowledgedAt *time.Time      `json:"acknowledgedAt,omitempty"`
 	RecoveredAt    *time.Time      `json:"recoveredAt,omitempty"`
 	ResolvedAt     *time.Time      `json:"resolvedAt,omitempty"`
+	Review         *IncidentReview `json:"review,omitempty"`
 	Timeline       []TimelineEvent `json:"timeline,omitempty"`
+}
+
+type IncidentReview struct {
+	ID                  string    `json:"id"`
+	Disposition         string    `json:"disposition"`
+	ReviewerPrincipalID string    `json:"reviewerPrincipalId"`
+	Comment             *string   `json:"comment,omitempty"`
+	ReviewedAt          time.Time `json:"reviewedAt"`
+}
+
+type WeeklyIncidentQuality struct {
+	PipelineID        string  `json:"pipelineId"`
+	PipelineName      string  `json:"pipelineName"`
+	Detector          string  `json:"detector"`
+	Total             int64   `json:"total"`
+	Reviewed          int64   `json:"reviewed"`
+	Unreviewed        int64   `json:"unreviewed"`
+	FalsePositives    int64   `json:"falsePositives"`
+	TruePositives     int64   `json:"truePositives"`
+	ExpectedBehavior  int64   `json:"expectedBehavior"`
+	Duplicates        int64   `json:"duplicates"`
+	FalsePositiveRate float64 `json:"falsePositiveRate"`
 }
 
 type TimelineEvent struct {

@@ -23,6 +23,8 @@ func (a *API) registerIncidents(api huma.API) {
 	huma.Register(api, observe, a.recordObservation)
 	huma.Register(api, securedOperation("listIncidents", http.MethodGet, "/v1/incidents", "Incidents"), a.listIncidents)
 	huma.Register(api, securedOperation("acknowledgeIncident", http.MethodPost, "/v1/incidents/{incidentId}/acknowledgements", "Incidents"), a.acknowledgeIncident)
+	huma.Register(api, securedOperation("reviewIncident", http.MethodPost, "/v1/incidents/{incidentId}/reviews", "Incidents"), a.reviewIncident)
+	huma.Register(api, securedOperation("weeklyIncidentQuality", http.MethodGet, "/v1/reports/incident-quality/weekly", "Reports"), a.weeklyIncidentQuality)
 }
 
 type createPipelineInput struct {
@@ -193,5 +195,71 @@ func (a *API) acknowledgeIncident(ctx context.Context, input *acknowledgeInput) 
 	}
 	out := &acknowledgeOutput{}
 	out.Body.Status = "acknowledged"
+	return out, nil
+}
+
+type reviewIncidentInput struct {
+	IncidentID string `path:"incidentId" format:"uuid"`
+	Body       struct {
+		Disposition string `json:"disposition" enum:"true_positive,false_positive,expected_behavior,duplicate"`
+		Comment     string `json:"comment,omitempty" maxLength:"500"`
+	}
+}
+
+type reviewIncidentOutput struct {
+	Body store.IncidentReview
+}
+
+func (a *API) reviewIncident(ctx context.Context, input *reviewIncidentInput) (*reviewIncidentOutput, error) {
+	actor, err := requirePermission(ctx, "incident:classify")
+	if err != nil {
+		return nil, err
+	}
+	review, err := a.store.ReviewIncident(ctx, actor, input.IncidentID, input.Body.Disposition, input.Body.Comment)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, huma.Error404NotFound("incident was not found")
+	}
+	if errors.Is(err, store.ErrInvalidIncidentReview) {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("incident review could not be recorded")
+	}
+	return &reviewIncidentOutput{Body: review}, nil
+}
+
+type weeklyIncidentQualityInput struct {
+	WeeksAgo int `query:"weeksAgo" minimum:"0" maximum:"52" default:"0" doc:"UTC calendar week offset: 0 is the current week, 1 is the previous week."`
+}
+
+type weeklyIncidentQualityOutput struct {
+	Body struct {
+		WeekStart time.Time                     `json:"weekStart"`
+		WeekEnd   time.Time                     `json:"weekEnd"`
+		Items     []store.WeeklyIncidentQuality `json:"items"`
+	}
+}
+
+func weekBoundsUTC(now time.Time, weeksAgo int) (time.Time, time.Time) {
+	now = now.UTC()
+	daysSinceMonday := (int(now.Weekday()) + 6) % 7
+	start := time.Date(now.Year(), now.Month(), now.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -7*weeksAgo)
+	return start, start.AddDate(0, 0, 7)
+}
+
+func (a *API) weeklyIncidentQuality(ctx context.Context, input *weeklyIncidentQualityInput) (*weeklyIncidentQualityOutput, error) {
+	actor, err := requirePermission(ctx, "incident:read")
+	if err != nil {
+		return nil, err
+	}
+	weekStart, weekEnd := weekBoundsUTC(time.Now(), input.WeeksAgo)
+	items, err := a.store.WeeklyIncidentQuality(ctx, actor.TenantID, weekStart, weekEnd)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("weekly incident quality report could not be loaded")
+	}
+	out := &weeklyIncidentQualityOutput{}
+	out.Body.WeekStart = weekStart
+	out.Body.WeekEnd = weekEnd
+	out.Body.Items = items
 	return out, nil
 }

@@ -47,6 +47,28 @@ Zapier as complete platforms.
 | Workflow completion rate | Above 99% excluding destination failures |
 | Design partners | 3 teams before adding another cloud |
 
+These are validation targets, not achieved results. Nimbus has not conducted
+customer interviews or enrolled design partners. The incident review API and
+weekly report provide an internal measurement loop so future trials can record
+evidence instead of inferring commercial validation from product telemetry.
+
+## Incident Quality Review Loop
+
+1. An owner or operator classifies an incident as `true_positive`,
+   `false_positive`, `expected_behavior`, or `duplicate`, with an optional
+   bounded comment.
+2. Nimbus retains each classification and audit event; the latest review is the
+   current disposition and remains independent from lifecycle status. Exact
+   retries by the same reviewer are idempotent and do not inflate history.
+3. The weekly UTC report groups incidents by pipeline and detector, exposing
+   reviewed and unreviewed coverage plus disposition counts.
+4. False-positive rate is calculated only from reviewed `false_positive` and
+   `true_positive` outcomes. Expected behavior, duplicates, and unreviewed
+   incidents are reported but excluded from that denominator.
+
+This loop supports detector-quality evaluation. It does not demonstrate demand,
+willingness to pay, operational outcomes at a customer, or commercial traction.
+
 ## Business Model Hypothesis
 
 - Community: self-hosted core, one tenant, standard connectors.

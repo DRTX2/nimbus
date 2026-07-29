@@ -394,6 +394,52 @@ curl --fail-with-body -X POST \
 Solo un incidente `open` puede reconocerse. Ventanas saludables sostenidas lo
 cambian a `recovered`.
 
+### `POST /v1/incidents/{incidentId}/reviews`
+
+Requiere rol `owner` u `operator`. `approver` y `viewer` solo pueden leer el
+incidente y no pueden clasificarlo.
+
+```bash
+curl --fail-with-body "$NIMBUS_URL/v1/incidents/$INCIDENT_ID/reviews" \
+  -H "Authorization: Bearer $NIMBUS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"disposition":"false_positive","comment":"Deploy planificado durante la ventana"}'
+```
+
+```json
+{"id":"99999999-9999-4999-8999-999999999999","disposition":"false_positive","reviewerPrincipalId":"REVIEWER_ID","comment":"Deploy planificado durante la ventana","reviewedAt":"2026-07-29T13:00:00Z"}
+```
+
+Las disposiciones permitidas son `true_positive`, `false_positive`,
+`expected_behavior` y `duplicate`. No cambian `status`: acknowledgement,
+recovery y resolution siguen siendo estados del ciclo de vida independientes.
+El comentario es opcional y admite como maximo 500 caracteres. Cada nueva
+clasificacion crea una revision y un audit event; reclasificar no sobrescribe el
+historial. `GET /v1/incidents` muestra la ultima revision en el campo `review`.
+
+### `GET /v1/reports/incident-quality/weekly`
+
+Disponible para todos los roles con lectura de incidentes. `weeksAgo` es un
+entero entre `0` y `52`; `0` selecciona la semana UTC actual. Las semanas son
+intervalos semiabiertos `[lunes 00:00 UTC, lunes siguiente 00:00 UTC)` basados en
+`openedAt`.
+
+```bash
+curl --fail-with-body \
+  "$NIMBUS_URL/v1/reports/incident-quality/weekly?weeksAgo=1" \
+  -H "Authorization: Bearer $NIMBUS_TOKEN"
+```
+
+```json
+{"weekStart":"2026-07-20T00:00:00Z","weekEnd":"2026-07-27T00:00:00Z","items":[{"pipelineId":"66666666-6666-4666-8666-666666666666","pipelineName":"Orders async pipeline","detector":"consumer_stalled","total":5,"reviewed":4,"unreviewed":1,"falsePositives":1,"truePositives":1,"expectedBehavior":1,"duplicates":1,"falsePositiveRate":0.5}]}
+```
+
+El reporte agrupa por pipeline y detector, ordenado por nombre de pipeline, ID y
+detector. Usa solo la clasificacion mas reciente de cada incidente. La tasa es
+`false_positive / (false_positive + true_positive)`; no incluye incidentes sin
+revision, `expected_behavior` ni `duplicate` en el denominador. Si no hay
+clasificaciones accionables la tasa es `0`.
+
 ## Analitica Y Auditoria
 
 ### `GET /v1/analytics/overview`
