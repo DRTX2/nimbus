@@ -63,6 +63,8 @@ opt-in y read-only. No se ha creado infraestructura cloud real.
 ### Operacion
 
 - PostgreSQL como autoridad y cola durable.
+- Migraciones/bootstrap como fase one-shot; API y workers validan checksums y no
+  ejecutan DDL al iniciar.
 - Outbox transaccional con lease, retry, fencing e idempotency key.
 - API y worker escalables por separado.
 - Polling como fallback de correccion, sin broker obligatorio.

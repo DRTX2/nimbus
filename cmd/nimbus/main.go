@@ -40,14 +40,23 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
-	if err := database.Migrate(rootCtx, pool); err != nil {
-		return err
-	}
 	repository := store.New(pool)
-	if err := repository.BootstrapTenant(rootCtx, cfg.TenantID, cfg.TenantName); err != nil {
-		return err
+	if cfg.Component == "migrate" {
+		migrationCtx, cancel := context.WithTimeout(rootCtx, cfg.MigrationTimeout)
+		defer cancel()
+		if err := database.Migrate(migrationCtx, pool); err != nil {
+			return err
+		}
+		if err := repository.BootstrapTenant(migrationCtx, cfg.TenantID, cfg.TenantName); err != nil {
+			return err
+		}
+		if err := repository.BootstrapOwner(migrationCtx, cfg.TenantID, "Nimbus Local Owner", cfg.APIKey); err != nil {
+			return err
+		}
+		logger.Info("Nimbus migrations and bootstrap completed")
+		return nil
 	}
-	if err := repository.BootstrapOwner(rootCtx, cfg.TenantID, "Nimbus Local Owner", cfg.APIKey); err != nil {
+	if err := database.VerifySchema(rootCtx, pool); err != nil {
 		return err
 	}
 

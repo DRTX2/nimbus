@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -55,32 +56,44 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := connection.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			name text PRIMARY KEY,
+			checksum text,
 			applied_at timestamptz NOT NULL DEFAULT now()
 		)`); err != nil {
 		return fmt.Errorf("create migration table: %w", err)
 	}
-
-	entries, err := fs.ReadDir(migrations, "migrations")
-	if err != nil {
-		return fmt.Errorf("read embedded migrations: %w", err)
+	if _, err := connection.Exec(ctx, "ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum text"); err != nil {
+		return fmt.Errorf("upgrade migration table: %w", err)
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	entries, err := migrationEntries()
+	if err != nil {
+		return err
+	}
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
 		contents, err := migrations.ReadFile("migrations/" + entry.Name())
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
+		checksum := fmt.Sprintf("%x", sha256.Sum256(contents))
 		tx, err := connection.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin migration %s: %w", entry.Name(), err)
 		}
 		var exists bool
-		if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = $1)", entry.Name()).Scan(&exists); err == nil && !exists {
+		var appliedChecksum string
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = $1),
+			       COALESCE((SELECT checksum FROM schema_migrations WHERE name = $1), '')
+		`, entry.Name()).Scan(&exists, &appliedChecksum)
+		if err == nil && exists && appliedChecksum != "" && appliedChecksum != checksum {
+			err = fmt.Errorf("migration %s checksum changed", entry.Name())
+		}
+		if err == nil && exists && appliedChecksum == "" {
+			_, err = tx.Exec(ctx, "UPDATE schema_migrations SET checksum = $2 WHERE name = $1", entry.Name(), checksum)
+		}
+		if err == nil && !exists {
 			if _, err = tx.Exec(ctx, string(contents)); err == nil {
-				_, err = tx.Exec(ctx, "INSERT INTO schema_migrations (name) VALUES ($1)", entry.Name())
+				_, err = tx.Exec(ctx, "INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)", entry.Name(), checksum)
 			}
 		}
 		if err != nil {
@@ -92,4 +105,43 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	return nil
+}
+
+// VerifySchema prevents runtime components from serving with missing or modified migrations.
+func VerifySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	entries, err := migrationEntries()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		contents, err := migrations.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
+		}
+		expected := fmt.Sprintf("%x", sha256.Sum256(contents))
+		var actual string
+		if err := pool.QueryRow(ctx, "SELECT COALESCE(checksum, '') FROM schema_migrations WHERE name = $1", entry.Name()).Scan(&actual); err != nil {
+			return fmt.Errorf("verify migration %s: %w", entry.Name(), err)
+		}
+		if actual != expected {
+			return fmt.Errorf("verify migration %s: checksum mismatch", entry.Name())
+		}
+	}
+	return nil
+}
+
+func migrationEntries() ([]fs.DirEntry, error) {
+	entries, err := fs.ReadDir(migrations, "migrations")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded migrations: %w", err)
+	}
+	entries = append([]fs.DirEntry(nil), entries...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	files := entries[:0]
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			files = append(files, entry)
+		}
+	}
+	return files, nil
 }

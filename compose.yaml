@@ -16,6 +16,28 @@ services:
       retries: 10
     restart: unless-stopped
 
+  nimbus-migrate:
+    build:
+      context: .
+    environment:
+      NIMBUS_ENV: development
+      NIMBUS_COMPONENT: migrate
+      NIMBUS_DATABASE_URL: postgres://nimbus:nimbus@postgres:5432/nimbus?sslmode=disable
+      NIMBUS_API_KEY: ${NIMBUS_API_KEY:-nimbus-local-development-key}
+      NIMBUS_TENANT_ID: 00000000-0000-0000-0000-000000000001
+      NIMBUS_TENANT_NAME: Nimbus Local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   nimbus:
     build:
       context: .
@@ -32,8 +54,8 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      nimbus-migrate:
+        condition: service_completed_successfully
       jaeger:
         condition: service_started
     read_only: true

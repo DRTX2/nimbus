@@ -2,10 +2,12 @@
 
 ## Local
 
-`make dev` builds and starts PostgreSQL, Nimbus, Prometheus, Grafana, and Jaeger.
-Use `docker compose ps`, `/health/ready`, and the demo in the README as smoke
-checks. `docker compose down -v` deletes local data and is intentionally not a
-Make target.
+`make dev` builds and starts PostgreSQL, runs the one-shot `nimbus-migrate`
+component, and starts Nimbus, Prometheus, Grafana, and Jaeger. API and worker
+components only verify the embedded migration checksums; they never execute DDL
+or bootstrap identities. Use `docker compose ps`, `/health/ready`, and the demo
+in the README as smoke checks. `docker compose down -v` deletes local data and
+is intentionally not a Make target.
 
 ## AWS Sandbox
 
@@ -67,6 +69,10 @@ kubectl -n nimbus create secret generic nimbus-secrets \
 kubectl apply -k deploy/k8s/base
 ```
 
-Change the image from the placeholder before applying. Production needs TLS,
-network policies supported by the cluster CNI, managed PostgreSQL, autoscaling
-evidence, disruption budgets, backups, and a secret-store integration.
+The base includes a migration Job. A controlled deployment must wait for
+`job/nimbus-migrate` to complete before considering API or worker readiness;
+runtime pods fail closed while migrations are missing or checksums differ.
+Change the image from the placeholder before applying. Production needs separate
+migrator/runtime database credentials, TLS, network policies supported by the
+cluster CNI, managed PostgreSQL, autoscaling evidence, disruption budgets,
+backups, and a secret-store integration.

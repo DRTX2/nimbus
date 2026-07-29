@@ -1,4 +1,4 @@
-.PHONY: fmt vet test test-race build verify security dev dev-split dev-down logs clean
+.PHONY: fmt vet test test-race test-integration build verify security dev dev-split dev-down logs clean
 
 fmt:
 	gofmt -w .
@@ -11,6 +11,9 @@ test:
 
 test-race:
 	go test -race ./...
+
+test-integration:
+	go test -tags=integration -count=1 ./internal/platform/database
 
 build:
 	go build -trimpath -o bin/nimbus ./cmd/nimbus

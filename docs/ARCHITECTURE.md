@@ -27,6 +27,15 @@ classified transient failures, and documents the destination requirement.
 Executions reference a concrete workflow version. The API creates new immutable
 versions and activates them explicitly without changing existing executions.
 
+### Migrations are a release phase
+
+The `migrate` component is the only process that applies embedded migrations and
+bootstraps the initial local identity. It serializes concurrent migrators with a
+PostgreSQL advisory lock and records a SHA-256 checksum for every migration.
+API and worker processes verify that exact history at startup and fail closed;
+they do not execute DDL. This is the first boundary required before assigning
+non-owner PostgreSQL roles and adopting expand/contract releases.
+
 ## Ingestion Sequence
 
 ```text

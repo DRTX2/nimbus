@@ -19,8 +19,9 @@ software supply-chain compromise.
 Implemented mitigations are documented in the README and code. The following
 limitations mean this release must not host mutually untrusted tenants:
 
-- Local mode bootstraps one tenant and owner key; additional API keys are hashed,
-  expiring, revocable, role-bound, and do not reactivate after revocation.
+- The one-shot migrator bootstraps one local tenant and owner key; API and worker
+  processes only verify immutable migration checksums. Additional API keys are
+  hashed, expiring, revocable, role-bound, and do not reactivate after revocation.
 - RBAC, separation-of-duty approvals, audit events, and tenant RLS policies exist.
   Current deployments use the schema owner, so RLS is not an active boundary
   until dedicated API/worker roles set tenant context per transaction.

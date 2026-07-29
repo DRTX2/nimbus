@@ -4,6 +4,7 @@ namespace: nimbus
 resources:
   - service-account.yaml
   - configmap.yaml
+  - migration-job.yaml
   - deployment.yaml
   - worker-deployment.yaml
   - service.yaml
