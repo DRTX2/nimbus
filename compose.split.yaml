@@ -1,0 +1,46 @@
+services:
+  nimbus:
+    profiles: [monolith]
+
+  nimbus-api:
+    build:
+      context: .
+    environment:
+      NIMBUS_ENV: development
+      NIMBUS_COMPONENT: api
+      NIMBUS_HTTP_ADDRESS: :8080
+      NIMBUS_DATABASE_URL: postgres://nimbus:nimbus@postgres:5432/nimbus?sslmode=disable
+      NIMBUS_API_KEY: ${NIMBUS_API_KEY:-nimbus-local-development-key}
+      NIMBUS_TENANT_ID: 00000000-0000-0000-0000-000000000001
+      NIMBUS_TENANT_NAME: Nimbus Local
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ["/tmp:size=16m,noexec,nosuid"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  nimbus-worker:
+    build:
+      context: .
+    environment:
+      NIMBUS_ENV: development
+      NIMBUS_COMPONENT: worker
+      NIMBUS_HTTP_ADDRESS: :8081
+      NIMBUS_DATABASE_URL: postgres://nimbus:nimbus@postgres:5432/nimbus?sslmode=disable
+      NIMBUS_API_KEY: ${NIMBUS_API_KEY:-nimbus-local-development-key}
+      NIMBUS_TENANT_ID: 00000000-0000-0000-0000-000000000001
+      NIMBUS_TENANT_NAME: Nimbus Local
+      NIMBUS_WORKER_COUNT: 2
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ["/tmp:size=16m,noexec,nosuid"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

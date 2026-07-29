@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+install -d -m 0700 /opt/nimbus
+
+aws ssm get-parameter \
+  --region '${aws_region}' \
+  --name '${config_parameter_name}' \
+  --with-decryption \
+  --query 'Parameter.Value' \
+  --output text > /opt/nimbus/runtime.env
+chmod 0600 /opt/nimbus/runtime.env
+
+while IFS='=' read -r key value; do
+  case "$key" in
+    NIMBUS_*|OTEL_*) printf '%s=%s\n' "$key" "$value" >> /opt/nimbus/app.env ;;
+    POSTGRES_PASSWORD) printf '%s=%s\n' "$key" "$value" >> /opt/nimbus/postgres.env ;;
+  esac
+done < /opt/nimbus/runtime.env
+chmod 0600 /opt/nimbus/app.env /opt/nimbus/postgres.env
+rm -f /opt/nimbus/runtime.env
+
+docker network create nimbus || true
+docker run -d --name postgres --restart unless-stopped \
+  --network nimbus \
+  --env-file /opt/nimbus/postgres.env \
+  -e POSTGRES_DB=nimbus \
+  -e POSTGRES_USER=nimbus \
+  -v nimbus-postgres:/var/lib/postgresql/data \
+  postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
+
+docker run -d --name nimbus --restart unless-stopped \
+  --network nimbus \
+  --env-file /opt/nimbus/app.env \
+  --read-only \
+  --tmpfs /tmp:size=16m,noexec,nosuid \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  -p 8080:8080 \
+  '${container_image}'
