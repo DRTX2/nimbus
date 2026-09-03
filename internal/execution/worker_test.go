@@ -1,7 +1,9 @@
 package execution
 
 import (
+	"net/http"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 )
@@ -31,11 +33,30 @@ func TestForbiddenIP(t *testing.T) {
 		{address: "10.0.0.1", want: true},
 		{address: "169.254.169.254", want: true},
 		{address: "::1", want: true},
+		{address: "::ffff:127.0.0.1", want: true},
 		{address: "1.1.1.1", want: false},
 	}
 	for _, test := range tests {
 		if got := forbiddenIP(netip.MustParseAddr(test.address)); got != test.want {
 			t.Fatalf("forbiddenIP(%s) = %v, want %v", test.address, got, test.want)
 		}
+	}
+}
+
+func TestSecureHTTPClientIgnoresEnvironmentProxies(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:8080")
+	t.Setenv("HTTP_PROXY", "http://proxy.example:8080")
+	client := secureHTTPClient(nil)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T", client.Transport)
+	}
+	if transport.Proxy != nil {
+		request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxy, _ := transport.Proxy(request)
+		t.Fatalf("workflow transport uses environment proxy %v (env %q)", proxy, os.Getenv("HTTPS_PROXY"))
 	}
 }

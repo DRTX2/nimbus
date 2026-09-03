@@ -307,8 +307,10 @@ Respuesta `201`:
 {"id":"66666666-6666-4666-8666-666666666666","name":"Orders async pipeline","mode":"fixture","region":"us-east-1","queueArn":"arn:aws:sqs:us-east-1:123456789012:orders","lambdaArn":"arn:aws:lambda:us-east-1:123456789012:function:orders-consumer","dlqArn":"arn:aws:sqs:us-east-1:123456789012:orders-dlq","incidentWorkflowId":"11111111-1111-4111-8111-111111111111","status":"active","consecutiveWindows":2,"backlogThreshold":100,"ageThresholdSeconds":300,"createdAt":"2026-07-29T12:00:00Z"}
 ```
 
-Modo `aws` exige `roleArn`. `externalIdEnv` contiene el nombre de una variable,
-no el secreto.
+Modo `aws` exige `roleArn` y `externalIdRef`. La referencia usa el formato
+`aws-external-id/NOMBRE` y referencia una entrada de `NIMBUS_AWS_EXTERNAL_IDS`;
+no contiene el secreto ni puede leer otras variables del proceso. Una referencia
+desconocida falla antes de llamar AWS.
 
 ### `GET /v1/pipelines`
 
@@ -341,6 +343,10 @@ curl --fail-with-body "$NIMBUS_URL/v1/pipelines/$PIPELINE_ID/observations" \
     "lambdaThrottles":0
   }'
 ```
+
+La ventana debe durar exactamente cinco minutos, comenzar en un limite UTC de
+cinco minutos, no estar en el futuro y tener menos de 24 horas. Solo ventanas
+realmente contiguas cuentan como una falla sostenida.
 
 Primera ventana, respuesta `202`:
 

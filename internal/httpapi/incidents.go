@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/david/nimbus/internal/awsmonitor"
 	"github.com/david/nimbus/internal/store"
 )
+
+const maxFixtureObservationAge = 24 * time.Hour
 
 func (a *API) registerIncidents(api huma.API) {
 	create := securedOperation("createPipeline", http.MethodPost, "/v1/pipelines", "Reliability")
@@ -36,7 +37,7 @@ type createPipelineInput struct {
 		LambdaARN           string `json:"lambdaArn" maxLength:"512"`
 		DLQARN              string `json:"dlqArn" maxLength:"512"`
 		RoleARN             string `json:"roleArn,omitempty" maxLength:"512"`
-		ExternalIDEnv       string `json:"externalIdEnv,omitempty" maxLength:"128" pattern:"^[A-Z][A-Z0-9_]*$"`
+		ExternalIDRef       string `json:"externalIdRef,omitempty" maxLength:"80" pattern:"^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$"`
 		IncidentWorkflowID  string `json:"incidentWorkflowId,omitempty" format:"uuid"`
 		ConsecutiveWindows  int    `json:"consecutiveWindows,omitempty" minimum:"1" maximum:"10"`
 		BacklogThreshold    int64  `json:"backlogThreshold,omitempty" minimum:"1"`
@@ -50,7 +51,7 @@ func (a *API) createPipeline(ctx context.Context, input *createPipelineInput) (*
 	if err != nil {
 		return nil, err
 	}
-	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDEnv: input.Body.ExternalIDEnv, IncidentWorkflowID: input.Body.IncidentWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds}
+	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDRef: input.Body.ExternalIDRef, IncidentWorkflowID: input.Body.IncidentWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds}
 	result, err := a.store.CreatePipeline(ctx, actor, pipeline)
 	if err != nil {
 		return nil, huma.Error400BadRequest("pipeline could not be created", err)
@@ -96,7 +97,7 @@ func (a *API) checkPipeline(ctx context.Context, input *checkPipelineInput) (*ob
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	observation, err := awsmonitor.Collect(checkCtx, pipeline)
+	observation, err := a.awsCollector.Collect(checkCtx, pipeline)
 	if err != nil {
 		a.logger.Warn("AWS pipeline check failed", "pipeline_id", pipeline.ID, "error", err)
 		return nil, huma.Error502BadGateway("CloudWatch metrics could not be collected")
@@ -135,8 +136,8 @@ func (a *API) recordObservation(ctx context.Context, input *observationInput) (*
 	if err != nil {
 		return nil, err
 	}
-	if !input.Body.WindowEndedAt.After(input.Body.WindowStartedAt) {
-		return nil, huma.Error400BadRequest("windowEndedAt must be after windowStartedAt")
+	if err := validateObservationWindow(input.Body.WindowStartedAt, input.Body.WindowEndedAt, time.Now().UTC()); err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
 	}
 	observation := store.Observation{PipelineID: input.PipelineID, WindowStartedAt: input.Body.WindowStartedAt, WindowEndedAt: input.Body.WindowEndedAt, VisibleMessages: input.Body.VisibleMessages, InFlightMessages: input.Body.InFlightMessages, OldestMessageSeconds: input.Body.OldestMessageSeconds, DLQMessages: input.Body.DLQMessages, LambdaInvocations: input.Body.LambdaInvocations, LambdaErrors: input.Body.LambdaErrors, LambdaThrottles: input.Body.LambdaThrottles, Source: "fixture"}
 	incidents, err := a.store.RecordObservation(ctx, actor, observation)
@@ -152,6 +153,23 @@ func (a *API) recordObservation(ctx context.Context, input *observationInput) (*
 	out := &observationOutput{}
 	out.Body.Incidents = incidents
 	return out, nil
+}
+
+func validateObservationWindow(start, end, now time.Time) error {
+	start, end = start.UTC(), end.UTC()
+	if end.Sub(start) != 5*time.Minute {
+		return errors.New("observation window must be exactly five minutes")
+	}
+	if !start.Equal(start.Truncate(5 * time.Minute)) {
+		return errors.New("windowStartedAt must use a five-minute UTC boundary")
+	}
+	if end.After(now.Add(time.Minute)) {
+		return errors.New("observation window cannot be in the future")
+	}
+	if end.Before(now.Add(-maxFixtureObservationAge)) {
+		return errors.New("observation window must be less than 24 hours old")
+	}
+	return nil
 }
 
 type incidentsOutput struct {

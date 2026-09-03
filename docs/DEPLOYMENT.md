@@ -96,7 +96,8 @@ kubectl -n nimbus create secret generic nimbus-secrets \
   --from-literal=NIMBUS_API_KEY='replace-me-with-a-long-random-token' \
   --from-literal=NIMBUS_API_DATABASE_URL='postgres://nimbus_api:...@postgres.example:5432/nimbus?sslmode=require' \
   --from-literal=NIMBUS_WORKER_DATABASE_URL='postgres://nimbus_worker:...@postgres.example:5432/nimbus?sslmode=require' \
-  --from-literal=NIMBUS_MIGRATOR_DATABASE_URL='postgres://nimbus_owner:...@postgres.example:5432/nimbus?sslmode=require'
+  --from-literal=NIMBUS_MIGRATOR_DATABASE_URL='postgres://nimbus_owner:...@postgres.example:5432/nimbus?sslmode=require' \
+  --from-literal=NIMBUS_AWS_EXTERNAL_IDS='{"aws-external-id/acme-prod":"customer-generated-value"}'
 kubectl apply -k deploy/k8s/base
 ```
 
@@ -109,3 +110,9 @@ hardcoded passwords. Change the image from the placeholder before applying. Prod
 needs TLS, network policies supported by the
 cluster CNI, managed PostgreSQL, autoscaling evidence, disruption budgets,
 backups, and a secret-store integration.
+
+Each pod receives explicit secret keys instead of the complete Secret. The API
+receives only its database URL and optional AWS external-ID map, the worker only
+its database URL, and the migration Job only the owner URL and bootstrap key.
+Migration 008 clears legacy environment-variable references; recreate them as
+opaque `aws-external-id/...` aliases after upgrading.

@@ -63,7 +63,7 @@ type Pipeline struct {
 	LambdaARN           string    `json:"lambdaArn"`
 	DLQARN              string    `json:"dlqArn"`
 	RoleARN             string    `json:"roleArn,omitempty"`
-	ExternalIDEnv       string    `json:"externalIdEnv,omitempty"`
+	ExternalIDRef       string    `json:"externalIdRef,omitempty"`
 	IncidentWorkflowID  string    `json:"incidentWorkflowId,omitempty"`
 	Status              string    `json:"status"`
 	ConsecutiveWindows  int       `json:"consecutiveWindows"`

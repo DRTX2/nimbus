@@ -27,7 +27,7 @@ jobs:
       - name: Verify
         run: make verify
       - name: Validate observability and deployment configuration
-        run: make observability && docker compose config --quiet && docker compose -f compose.yaml -f compose.split.yaml config --quiet
+        run: make observability && make validate-deploy
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Build container

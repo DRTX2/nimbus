@@ -2,8 +2,8 @@ package awsmonitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -20,9 +20,28 @@ type cloudWatchAPI interface {
 	GetMetricData(context.Context, *cloudwatch.GetMetricDataInput, ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricDataOutput, error)
 }
 
-func Collect(ctx context.Context, pipeline store.Pipeline) (store.Observation, error) {
+type Collector struct {
+	externalIDs map[string]string
+}
+
+func NewCollector(externalIDs map[string]string) *Collector {
+	configured := make(map[string]string, len(externalIDs))
+	for ref, value := range externalIDs {
+		configured[ref] = value
+	}
+	return &Collector{externalIDs: configured}
+}
+
+func (c *Collector) Collect(ctx context.Context, pipeline store.Pipeline) (store.Observation, error) {
 	if pipeline.Mode != "aws" {
 		return store.Observation{}, fmt.Errorf("pipeline %s is not an AWS pipeline", pipeline.ID)
+	}
+	if pipeline.RoleARN != "" && pipeline.ExternalIDRef == "" {
+		return store.Observation{}, errors.New("AWS external ID reference is required")
+	}
+	externalID, err := c.resolveExternalID(pipeline.ExternalIDRef)
+	if err != nil {
+		return store.Observation{}, err
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(pipeline.Region))
 	if err != nil {
@@ -30,12 +49,27 @@ func Collect(ctx context.Context, pipeline store.Pipeline) (store.Observation, e
 	}
 	if pipeline.RoleARN != "" {
 		cfg.Credentials = aws.NewCredentialsCache(stscreds.NewAssumeRoleProvider(sts.NewFromConfig(cfg), pipeline.RoleARN, func(options *stscreds.AssumeRoleOptions) {
-			if pipeline.ExternalIDEnv != "" {
-				options.ExternalID = aws.String(os.Getenv(pipeline.ExternalIDEnv))
+			if externalID != "" {
+				options.ExternalID = aws.String(externalID)
 			}
 		}))
 	}
-	return collect(ctx, cloudwatch.NewFromConfig(cfg), pipeline, time.Now().UTC())
+	return collect(ctx, cloudwatch.NewFromConfig(cfg), pipeline, collectionWindowEnd(time.Now()))
+}
+
+func collectionWindowEnd(now time.Time) time.Time {
+	return now.UTC().Truncate(5 * time.Minute).Add(-5 * time.Minute)
+}
+
+func (c *Collector) resolveExternalID(ref string) (string, error) {
+	if ref == "" {
+		return "", nil
+	}
+	value, ok := c.externalIDs[ref]
+	if !ok {
+		return "", errors.New("AWS external ID reference is not configured")
+	}
+	return value, nil
 }
 
 func collect(ctx context.Context, client cloudWatchAPI, pipeline store.Pipeline, end time.Time) (store.Observation, error) {

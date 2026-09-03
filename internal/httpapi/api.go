@@ -11,6 +11,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
+	"github.com/david/nimbus/internal/awsmonitor"
 	"github.com/david/nimbus/internal/platform/observability"
 	"github.com/david/nimbus/internal/store"
 	"github.com/david/nimbus/internal/workflow"
@@ -22,12 +23,13 @@ import (
 type principalContextKey struct{}
 
 type API struct {
-	store   *store.Store
-	metrics *observability.Metrics
-	logger  *slog.Logger
+	store        *store.Store
+	metrics      *observability.Metrics
+	logger       *slog.Logger
+	awsCollector *awsmonitor.Collector
 }
 
-func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger) http.Handler {
+func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger, awsCollector *awsmonitor.Collector) http.Handler {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID, middleware.Recoverer)
 	router.Use(requestLogger(logger))
@@ -35,8 +37,8 @@ func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger
 	router.Use(authenticate(store, logger))
 	router.Handle("/metrics", metrics.Handler())
 
-	config := huma.DefaultConfig("Nimbus Event Automation API", "0.1.0")
-	config.Info.Description = "Reliable, tenant-scoped event workflow execution with at-least-once semantics."
+	config := huma.DefaultConfig("Nimbus Async Pipeline Guardian API", "0.1.0")
+	config.Info.Description = "Explainable AWS asynchronous-pipeline incidents backed by reliable, tenant-scoped workflow execution."
 	config.DocsRenderer = huma.DocsRendererScalar
 	config.DocsRendererConfig = map[string]any{"theme": "deepSpace", "hideModels": false}
 	api := humachi.New(router, config)
@@ -47,7 +49,7 @@ func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger
 			Description: "Tenant-scoped Nimbus API token. The local development token is documented in the README.",
 		},
 	}
-	handler := &API{store: store, metrics: metrics, logger: logger}
+	handler := &API{store: store, metrics: metrics, logger: logger, awsCollector: awsCollector}
 	handler.register(api)
 
 	return otelhttp.NewHandler(router, "nimbus.http")

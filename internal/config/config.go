@@ -1,15 +1,23 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const developmentAPIKey = "nimbus-local-development-key"
+
+const maxExternalIDsConfigBytes = 64 << 10
+
+var externalIDRefPattern = regexp.MustCompile(`^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$`)
 
 type Config struct {
 	Component                  string
@@ -27,15 +35,29 @@ type Config struct {
 	OperationalMetricsInterval time.Duration
 	OTLPEndpoint               string
 	OutboundAllowedHosts       []string
+	AWSExternalIDs             map[string]string
 }
 
 func Load() (Config, error) {
+	component := env("NIMBUS_COMPONENT", "all")
+	environment := strings.ToLower(env("NIMBUS_ENV", "development"))
+	externalIDs, err := parseExternalIDs(os.Getenv("NIMBUS_AWS_EXTERNAL_IDS"))
+	if err != nil {
+		return Config{}, err
+	}
+	apiKey := ""
+	if component == "migrate" {
+		apiKey = strings.TrimSpace(os.Getenv("NIMBUS_API_KEY"))
+		if apiKey == "" && environment == "development" {
+			apiKey = developmentAPIKey
+		}
+	}
 	cfg := Config{
-		Component:                  env("NIMBUS_COMPONENT", "all"),
-		Environment:                env("NIMBUS_ENV", "development"),
+		Component:                  component,
+		Environment:                environment,
 		HTTPAddress:                env("NIMBUS_HTTP_ADDRESS", ":8080"),
 		DatabaseURL:                env("NIMBUS_DATABASE_URL", "postgres://nimbus:nimbus@localhost:5432/nimbus?sslmode=disable"),
-		APIKey:                     env("NIMBUS_API_KEY", developmentAPIKey),
+		APIKey:                     apiKey,
 		TenantID:                   env("NIMBUS_TENANT_ID", "00000000-0000-0000-0000-000000000001"),
 		TenantName:                 env("NIMBUS_TENANT_NAME", "Nimbus Local"),
 		WorkerCount:                envInt("NIMBUS_WORKER_COUNT", 2),
@@ -45,6 +67,7 @@ func Load() (Config, error) {
 		ShutdownTimeout:            envDuration("NIMBUS_SHUTDOWN_TIMEOUT", 15*time.Second),
 		OperationalMetricsInterval: envDuration("NIMBUS_OPERATIONAL_METRICS_INTERVAL", 15*time.Second),
 		OTLPEndpoint:               strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+		AWSExternalIDs:             externalIDs,
 	}
 
 	for _, host := range strings.Split(os.Getenv("NIMBUS_OUTBOUND_ALLOWED_HOSTS"), ",") {
@@ -65,14 +88,47 @@ func Load() (Config, error) {
 	if cfg.OperationalMetricsInterval < 5*time.Second {
 		return Config{}, errors.New("NIMBUS_OPERATIONAL_METRICS_INTERVAL must be at least 5s")
 	}
-	if len(cfg.APIKey) < 20 {
-		return Config{}, errors.New("NIMBUS_API_KEY must contain at least 20 characters")
-	}
-	if cfg.Environment == "production" && cfg.APIKey == developmentAPIKey {
-		return Config{}, errors.New("NIMBUS_API_KEY must be changed in production")
+	if cfg.Component == "migrate" {
+		if len(cfg.APIKey) < 20 {
+			return Config{}, errors.New("NIMBUS_API_KEY must contain at least 20 characters for the migrate component")
+		}
+		if cfg.Environment != "development" && cfg.APIKey == developmentAPIKey {
+			return Config{}, errors.New("NIMBUS_API_KEY must be changed outside development")
+		}
 	}
 
 	return cfg, nil
+}
+
+func parseExternalIDs(raw string) (map[string]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]string{}, nil
+	}
+	if len(raw) > maxExternalIDsConfigBytes {
+		return nil, errors.New("NIMBUS_AWS_EXTERNAL_IDS exceeds 64 KiB")
+	}
+	values := map[string]string{}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&values); err != nil {
+		return nil, fmt.Errorf("parse NIMBUS_AWS_EXTERNAL_IDS: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("NIMBUS_AWS_EXTERNAL_IDS must contain one JSON object")
+	}
+	if len(values) > 100 {
+		return nil, errors.New("NIMBUS_AWS_EXTERNAL_IDS must contain at most 100 references")
+	}
+	for ref, value := range values {
+		if !externalIDRefPattern.MatchString(ref) {
+			return nil, fmt.Errorf("NIMBUS_AWS_EXTERNAL_IDS contains invalid reference %q", ref)
+		}
+		if !utf8.ValidString(value) || len(value) < 2 || len(value) > 1224 {
+			return nil, fmt.Errorf("NIMBUS_AWS_EXTERNAL_IDS value for %q must contain 2 to 1224 valid UTF-8 bytes", ref)
+		}
+	}
+	return values, nil
 }
 
 func env(name, fallback string) string {

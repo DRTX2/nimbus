@@ -23,7 +23,6 @@ spec:
           image: ghcr.io/replace-me/nimbus:sha-replace-me
           envFrom:
             - configMapRef: {name: nimbus-config}
-            - secretRef: {name: nimbus-secrets}
           env:
             - name: NIMBUS_COMPONENT
               value: worker
@@ -32,6 +31,12 @@ spec:
                 secretKeyRef:
                   name: nimbus-secrets
                   key: NIMBUS_WORKER_DATABASE_URL
+            - name: NIMBUS_AWS_EXTERNAL_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: nimbus-secrets
+                  key: NIMBUS_AWS_EXTERNAL_IDS
+                  optional: true
             - name: NIMBUS_HTTP_ADDRESS
               value: :8081
           ports:

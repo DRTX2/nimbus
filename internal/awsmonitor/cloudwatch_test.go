@@ -52,3 +52,22 @@ func TestResourceName(t *testing.T) {
 		t.Fatalf("resourceName = %q", got)
 	}
 }
+
+func TestCollectorResolvesOnlyConfiguredExternalIDs(t *testing.T) {
+	collector := NewCollector(map[string]string{"aws-external-id/acme": "dedicated-secret"})
+	value, err := collector.resolveExternalID("aws-external-id/acme")
+	if err != nil || value != "dedicated-secret" {
+		t.Fatalf("resolveExternalID() = %q, %v", value, err)
+	}
+	if _, err := collector.resolveExternalID("NIMBUS_API_KEY"); err == nil {
+		t.Fatal("resolveExternalID() accepted an unconfigured process-secret name")
+	}
+}
+
+func TestCollectionWindowUsesPreviousClosedPeriod(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 7, 31, 0, time.FixedZone("offset", 2*60*60))
+	want := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	if got := collectionWindowEnd(now); !got.Equal(want) {
+		t.Fatalf("collectionWindowEnd() = %s, want %s", got, want)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,12 +15,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+const detectorWindowDuration = 5 * time.Minute
+
+var pipelineExternalIDRefPattern = regexp.MustCompile(`^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$`)
+
 func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pipeline) (Pipeline, error) {
-	if pipeline.Mode != "fixture" && pipeline.Mode != "aws" {
-		return Pipeline{}, errors.New("pipeline mode must be fixture or aws")
-	}
-	if pipeline.Mode == "aws" && strings.TrimSpace(pipeline.RoleARN) == "" {
-		return Pipeline{}, errors.New("roleArn is required for AWS pipelines")
+	if err := validatePipeline(pipeline); err != nil {
+		return Pipeline{}, err
 	}
 	if pipeline.ConsecutiveWindows == 0 {
 		pipeline.ConsecutiveWindows = 2
@@ -36,11 +38,11 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	err = tx.QueryRow(ctx, `
-		INSERT INTO monitored_pipelines (tenant_id, name, mode, region, queue_arn, lambda_arn, dlq_arn, role_arn, external_id_env,
+		INSERT INTO monitored_pipelines (tenant_id, name, mode, region, queue_arn, lambda_arn, dlq_arn, role_arn, external_id_ref,
 			incident_workflow_id, consecutive_windows, backlog_threshold, age_threshold_seconds)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,'')::uuid,$11,$12,$13)
 		RETURNING id, status, created_at`, actor.TenantID, pipeline.Name, pipeline.Mode, pipeline.Region,
-		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDEnv, pipeline.IncidentWorkflowID,
+		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDRef, pipeline.IncidentWorkflowID,
 		pipeline.ConsecutiveWindows, pipeline.BacklogThreshold, pipeline.AgeThresholdSeconds).
 		Scan(&pipeline.ID, &pipeline.Status, &pipeline.CreatedAt)
 	if err != nil {
@@ -55,6 +57,22 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 	return pipeline, nil
 }
 
+func validatePipeline(pipeline Pipeline) error {
+	if pipeline.Mode != "fixture" && pipeline.Mode != "aws" {
+		return errors.New("pipeline mode must be fixture or aws")
+	}
+	if pipeline.Mode == "aws" && strings.TrimSpace(pipeline.RoleARN) == "" {
+		return errors.New("roleArn is required for AWS pipelines")
+	}
+	if pipeline.Mode == "aws" && !pipelineExternalIDRefPattern.MatchString(pipeline.ExternalIDRef) {
+		return errors.New("externalIdRef is required for AWS pipelines and must use the aws-external-id namespace")
+	}
+	if pipeline.Mode == "fixture" && (pipeline.RoleARN != "" || pipeline.ExternalIDRef != "") {
+		return errors.New("fixture pipelines cannot configure AWS credentials")
+	}
+	return nil
+}
+
 func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline, error) {
 	tx, err := s.beginTenant(ctx, tenantID)
 	if err != nil {
@@ -62,7 +80,7 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_env,''),COALESCE(incident_workflow_id::text,''),
+		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),COALESCE(incident_workflow_id::text,''),
 			status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
@@ -72,7 +90,7 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 	result := make([]Pipeline, 0)
 	for rows.Next() {
 		var item Pipeline
-		if err := rows.Scan(&item.ID, &item.Name, &item.Mode, &item.Region, &item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDEnv,
+		if err := rows.Scan(&item.ID, &item.Name, &item.Mode, &item.Region, &item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef,
 			&item.IncidentWorkflowID, &item.Status, &item.ConsecutiveWindows, &item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan pipeline: %w", err)
 		}
@@ -94,10 +112,10 @@ func (s *Store) GetPipeline(ctx context.Context, tenantID, id string) (Pipeline,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var item Pipeline
-	err = tx.QueryRow(ctx, `SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_env,''),
+	err = tx.QueryRow(ctx, `SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),
 		COALESCE(incident_workflow_id::text,''),status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 AND id=$2`, tenantID, id).Scan(&item.ID, &item.Name, &item.Mode, &item.Region,
-		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDEnv, &item.IncidentWorkflowID, &item.Status, &item.ConsecutiveWindows,
+		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.Status, &item.ConsecutiveWindows,
 		&item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Pipeline{}, ErrNotFound
@@ -149,7 +167,7 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT visible_messages,in_flight_messages,oldest_message_seconds,dlq_messages,lambda_invocations,lambda_errors,lambda_throttles
+		SELECT window_started_at,window_ended_at,visible_messages,in_flight_messages,oldest_message_seconds,dlq_messages,lambda_invocations,lambda_errors,lambda_throttles
 		FROM pipeline_observations WHERE tenant_id=$1 AND pipeline_id=$2 ORDER BY window_started_at DESC LIMIT $3`,
 		actor.TenantID, observation.PipelineID, pipeline.ConsecutiveWindows)
 	if err != nil {
@@ -158,7 +176,7 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 	windows := make([]Observation, 0, pipeline.ConsecutiveWindows)
 	for rows.Next() {
 		var item Observation
-		if err := rows.Scan(&item.VisibleMessages, &item.InFlightMessages, &item.OldestMessageSeconds, &item.DLQMessages,
+		if err := rows.Scan(&item.WindowStartedAt, &item.WindowEndedAt, &item.VisibleMessages, &item.InFlightMessages, &item.OldestMessageSeconds, &item.DLQMessages,
 			&item.LambdaInvocations, &item.LambdaErrors, &item.LambdaThrottles); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan detector window: %w", err)
@@ -166,7 +184,7 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 		windows = append(windows, item)
 	}
 	rows.Close()
-	if len(windows) < pipeline.ConsecutiveWindows {
+	if len(windows) < pipeline.ConsecutiveWindows || !contiguousDetectorWindows(windows) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit observation: %w", err)
 		}
@@ -242,6 +260,24 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 		return nil, fmt.Errorf("commit observation evaluation: %w", err)
 	}
 	return changed, nil
+}
+
+// Windows are ordered newest first. Exact UTC boundaries prevent overlapping
+// checks or old, separated samples from being interpreted as a sustained fault.
+func contiguousDetectorWindows(windows []Observation) bool {
+	if len(windows) == 0 {
+		return false
+	}
+	for index, window := range windows {
+		if window.WindowEndedAt.Sub(window.WindowStartedAt) != detectorWindowDuration ||
+			!window.WindowStartedAt.Equal(window.WindowStartedAt.UTC().Truncate(detectorWindowDuration)) {
+			return false
+		}
+		if index > 0 && !windows[index-1].WindowStartedAt.Equal(window.WindowEndedAt) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) ListIncidents(ctx context.Context, tenantID string) ([]Incident, error) {

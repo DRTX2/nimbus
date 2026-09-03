@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/david/nimbus/internal/awsmonitor"
 	"github.com/david/nimbus/internal/config"
 	"github.com/david/nimbus/internal/execution"
 	"github.com/david/nimbus/internal/httpapi"
@@ -86,7 +87,7 @@ func run(logger *slog.Logger) error {
 	}
 	handler := httpapi.NewOperational(repository, metrics, logger)
 	if cfg.Component == "all" || cfg.Component == "api" {
-		handler = httpapi.New(repository, metrics, logger)
+		handler = httpapi.New(repository, metrics, logger, awsmonitor.NewCollector(cfg.AWSExternalIDs))
 	}
 
 	server := &http.Server{

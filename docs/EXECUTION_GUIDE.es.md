@@ -90,13 +90,16 @@ solo llama `cloudwatch:GetMetricData`.
 1. Despliega el modulo `infra/terraform/modules/aws-pipeline-readonly` en la
    cuenta observada.
 2. Configura un external ID aleatorio fuera del payload del workflow.
-3. Expone ese valor al proceso mediante una variable, por ejemplo
-   `NIMBUS_AWS_EXTERNAL_ID`.
-4. Registra el pipeline con `externalIdEnv: NIMBUS_AWS_EXTERNAL_ID`.
+3. Agrega el valor al mapa JSON exclusivo del API, por ejemplo
+   `NIMBUS_AWS_EXTERNAL_IDS={"aws-external-id/acme-prod":"valor-aleatorio"}`.
+4. Registra el pipeline con `externalIdRef: aws-external-id/acme-prod`.
 5. Ejecuta `POST /v1/pipelines/{id}/checks`.
 
 Nimbus rechaza la ventana si CloudWatch no devuelve las siete series completas.
-No consulta mensajes SQS ni CloudWatch Logs.
+No consulta mensajes SQS ni CloudWatch Logs. La referencia nunca puede nombrar
+una variable del proceso: solo resuelve entradas del mapa dedicado y falla de
+forma cerrada si la entrada no existe. La consulta usa el periodo UTC completo
+anterior para tolerar el retraso normal de publicacion de metricas.
 
 ## 7. Troubleshooting
 

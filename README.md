@@ -1,9 +1,10 @@
 # Nimbus
 
-Nimbus is an open-source event automation control plane for small engineering
-teams. It receives operational or business events, executes versioned DAGs with
-durable retries, and preserves enough evidence to answer: **what ran, why, and
-what failed?**
+Nimbus is an open-source guardian for revenue-sensitive AWS asynchronous
+pipelines. It turns sustained SQS, Lambda, and DLQ symptoms into explainable,
+deduplicated incidents without reading queue payloads or application logs. A
+durable event automation engine preserves the evidence needed to answer:
+**what happened, why did Nimbus alert, and what ran next?**
 
 The repository is intentionally a modular monolith. PostgreSQL is the source of
 truth and durable queue; Redis, NATS, microservices, and managed Kubernetes are
@@ -11,15 +12,16 @@ added only when measured constraints justify them.
 
 ## Why This Product
 
-Small teams often have alerts and webhooks but no reliable, auditable way to
-automate the runbook that follows. Scripts in CI are difficult to govern, while
-large workflow platforms are expensive and operationally heavy. Nimbus targets
-that gap with bounded execution, idempotent ingestion, tenant isolation, and an
-approval-ready architecture.
+Lean AWS teams often discover failed billing, order, import, or notification
+pipelines after customers report them. Existing alarms expose isolated metrics,
+while engineers still correlate queue age, consumer activity, errors, throttles,
+and DLQ growth by hand. Nimbus targets that gap with read-only collection,
+deterministic evidence, durable incident state, and a governed response engine.
 
-The first commercial wedge is **reliability automation for asynchronous AWS
-pipelines**: correlate SQS/Lambda/DLQ signals, open an actionable incident, and
-run a safe diagnostic or remediation workflow. See [`docs/PRODUCT.md`](docs/PRODUCT.md).
+The commercial wedge is **AWS Async Pipeline Guardian**: detect and explain a
+stalled consumer, retry storm, throttling, or DLQ arrival, then track response
+and recovery. General workflow execution is enabling infrastructure, not the
+market category. See [`docs/PRODUCT.md`](docs/PRODUCT.md).
 
 ## Current Vertical
 

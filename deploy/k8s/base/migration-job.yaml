@@ -24,8 +24,6 @@ spec:
           envFrom:
             - configMapRef:
                 name: nimbus-config
-            - secretRef:
-                name: nimbus-secrets
           env:
             - name: NIMBUS_COMPONENT
               value: migrate
@@ -34,6 +32,11 @@ spec:
                 secretKeyRef:
                   name: nimbus-secrets
                   key: NIMBUS_MIGRATOR_DATABASE_URL
+            - name: NIMBUS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nimbus-secrets
+                  key: NIMBUS_API_KEY
           resources:
             requests:
               cpu: 25m

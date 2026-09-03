@@ -1,17 +1,32 @@
-# Product Brief
+# Product Strategy
 
 ## Product Thesis
 
-Nimbus helps small engineering teams turn alerts and webhooks into safe,
-reliable, and auditable operational workflows. The customer buys shorter
-incident response and less manual toil, not a generic collection of cloud tools.
+Nimbus helps lean AWS engineering teams detect and explain failures in
+revenue-sensitive asynchronous pipelines before customers report them. The
+customer buys earlier detection, faster diagnosis, and evidence of recovery.
+The durable workflow engine is supporting infrastructure, not the headline.
+
+Nimbus does not compete as a generic workflow builder, observability platform,
+or autonomous remediation agent.
 
 ## Initial Customer Profile
 
-- Startup or scale-up with 3-20 engineers and no dedicated SRE team.
-- One to three AWS accounts using Lambda, SQS, EventBridge, and PostgreSQL.
-- On-call engineers currently execute runbooks from chat, CI, or local scripts.
-- Platform lead, CTO, or engineering manager owns the buying decision.
+- B2B SaaS company with 8-40 engineers and no dedicated SRE team, or one platform
+  engineer supporting the whole organization.
+- One to three AWS accounts and 5-50 production `SQS -> Lambda -> DLQ` pipelines.
+- Revenue-sensitive workloads such as billing, orders, imports, notifications,
+  or partner integrations.
+- CloudWatch alarms exist but are noisy, fragmented, or poor at diagnosis.
+- The Head of Engineering, CTO, or platform lead buys; the on-call engineer uses
+  the product.
+
+## Primary Job To Be Done
+
+When a revenue-sensitive SQS/Lambda pipeline degrades, tell the on-call engineer
+whether the consumer stalled, Lambda is throttling or failing, or work reached
+the DLQ. Show the bounded numeric evidence and track recovery without reading
+customer messages, so the team can act before support tickets arrive.
 
 ## First Commercial Package
 
@@ -23,7 +38,8 @@ incident response and less manual toil, not a generic collection of cloud tools.
 4. Detect a stalled consumer, retry storm, throttling, or messages present in the DLQ.
 5. Create one deduplicated incident with evidence, likely cause, and runbook.
 6. Notify a generic webhook and track recovery.
-7. Offer an approval-gated diagnostic/remediation workflow in a later release.
+7. Preserve acknowledgement, classification, and recovery in one timeline.
+8. Offer approval-gated read-only diagnostics after detection is trusted.
 
 This wedge is narrower and cheaper than competing with Datadog, Temporal, or
 Zapier as complete platforms.
@@ -36,6 +52,18 @@ Zapier as complete platforms.
 - Cost and blast-radius budgets per tenant.
 - Open core: local execution is free; managed connectors and governance are paid.
 
+## Essential Customer Journey
+
+1. Deploy a customer-controlled, read-only AWS role with an external ID.
+2. Discover and select an SQS/Lambda/DLQ topology instead of entering ARNs.
+3. Preview metric availability, permissions, and expected API cost.
+4. Accept recommended thresholds and a five-minute monitoring policy.
+5. Receive an incident containing pipeline identity, detector, evidence, likely
+   checks, and a link to the incident.
+6. Acknowledge, investigate, and classify the incident from one console.
+7. Receive a recovery notification and review the durable timeline.
+8. Review weekly detection quality and operational value.
+
 ## Success Metrics
 
 | Metric | MVP target |
@@ -46,6 +74,10 @@ Zapier as complete platforms.
 | False alert rate | Under 1 per pipeline/week |
 | Workflow completion rate | Above 99% excluding destination failures |
 | Design partners | 3 teams before adding another cloud |
+
+Additional activation metrics are time to valid AWS connection, time to first
+monitored pipeline, percentage of incidents acknowledged and classified, and
+incidents found before a customer escalation.
 
 These are validation targets, not achieved results. Nimbus has not conducted
 customer interviews or enrolled design partners. The incident review API and
@@ -69,10 +101,53 @@ evidence instead of inferring commercial validation from product telemetry.
 This loop supports detector-quality evaluation. It does not demonstrate demand,
 willingness to pay, operational outcomes at a customer, or commercial traction.
 
+## Delivery Roadmap
+
+### Now: complete one sellable loop
+
+- Enroll three design partners through concierge onboarding.
+- Add a budgeted scheduler using closed, non-overlapping five-minute windows,
+  jitter, freshness checks, and tenant call quotas.
+- Add topology discovery and connection validation.
+- Deliver actionable opened and recovered notifications, beginning with signed
+  webhooks and one polished chat integration selected by partners.
+- Add a focused console for connection, pipeline health, incident inbox/detail,
+  acknowledgement, recovery, and quality review.
+- Complete hosted boundaries: managed secret references, OIDC, quotas, retention,
+  backup restore evidence, and end-to-end tests.
+
+### Next: deepen diagnosis
+
+- Read-only event-source mapping state, concurrency configuration, queue
+  attributes, and recent deployment context.
+- Detector backtesting and recommended investigation steps.
+- Multi-account and environment grouping when pilots require it.
+- One narrowly scoped, approval-gated diagnostic only after repeated demand.
+
+### Later: expand only with evidence
+
+- A second AWS topology requested by at least three paying customers.
+- Enterprise identity, retention, audit export, and private networking.
+- Adaptive baselines after enough classified production history exists.
+- Mutating remediation only with preview, dry run, idempotency, approval, and
+  explicit blast-radius limits.
+
+## Explicit Non-Goals
+
+- A Zapier/n8n-style connector marketplace or visual general-purpose canvas.
+- Temporal-like SDKs, arbitrary code execution, or a new workflow language.
+- Multi-cloud support before the AWS wedge has three successful partners.
+- Broad log ingestion, on-call scheduling, or replacing observability tools.
+- Autonomous remediation before deterministic diagnosis is trusted.
+- Kafka, Redis, microservices, or partitioning without measured pressure.
+- AI in the detection or execution critical path.
+
 ## Business Model Hypothesis
 
-- Community: self-hosted core, one tenant, standard connectors.
-- Team: managed control plane, multiple accounts, notifications, 30-day history.
+- Design partner: paid, isolated AWS pilot with concierge calibration.
+- Community: self-hosted core, one tenant, deterministic detectors.
+- Team: managed control plane, multiple accounts, notifications, 30-day history,
+  priced by monitored pipeline rather than event volume.
 - Governance: SSO, approvals, access reviews, retention policies, audit export.
 - Enterprise later: private networking, custom retention, compliance evidence,
   support, and organization-wide policy.

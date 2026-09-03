@@ -60,8 +60,12 @@ func (w *Worker) loop(ctx context.Context, owner string) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
-		if err := w.runOne(ctx, owner); err != nil && !errors.Is(err, context.Canceled) {
+		worked, err := w.runOne(ctx, owner)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			w.logger.Error("worker iteration failed", "worker_id", owner, "error", err)
+		}
+		if worked {
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -71,10 +75,10 @@ func (w *Worker) loop(ctx context.Context, owner string) {
 	}
 }
 
-func (w *Worker) runOne(ctx context.Context, owner string) error {
+func (w *Worker) runOne(ctx context.Context, owner string) (bool, error) {
 	job, found, err := w.store.ClaimStep(ctx, owner, w.leaseDuration)
 	if err != nil || !found {
-		return err
+		return false, err
 	}
 	started := time.Now()
 	output, retryable, err := w.execute(ctx, job)
@@ -82,10 +86,10 @@ func (w *Worker) runOne(ctx context.Context, owner string) error {
 	if err == nil {
 		w.metrics.StepsCompleted.WithLabelValues(job.StepType, "succeeded").Inc()
 		if err := w.store.CompleteStep(ctx, job, output); err != nil {
-			return fmt.Errorf("complete job %s: %w", job.ID, err)
+			return true, fmt.Errorf("complete job %s: %w", job.ID, err)
 		}
 		w.logger.Info("step succeeded", "execution_id", job.ExecutionID, "step_id", job.StepID, "attempt", job.Attempt)
-		return nil
+		return true, nil
 	}
 
 	w.metrics.StepsCompleted.WithLabelValues(job.StepType, "failed").Inc()
@@ -97,11 +101,11 @@ func (w *Worker) runOne(ctx context.Context, owner string) error {
 		retryAt = &next
 	}
 	if persistErr := w.store.FailStep(ctx, job, message, retryAt); persistErr != nil {
-		return fmt.Errorf("persist job %s failure: %w", job.ID, persistErr)
+		return true, fmt.Errorf("persist job %s failure: %w", job.ID, persistErr)
 	}
 	w.logger.Warn("step failed", "execution_id", job.ExecutionID, "step_id", job.StepID,
 		"attempt", job.Attempt, "retryable", retryAt != nil, "error", message)
-	return nil
+	return true, nil
 }
 
 func (w *Worker) execute(parent context.Context, job store.Job) (json.RawMessage, bool, error) {
@@ -185,7 +189,6 @@ func secureHTTPClient(allowedHosts []string) *http.Client {
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
@@ -220,6 +223,7 @@ func secureHTTPClient(allowedHosts []string) *http.Client {
 }
 
 func forbiddenIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
 	return !ip.IsValid() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }

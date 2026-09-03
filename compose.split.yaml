@@ -10,7 +10,7 @@ services:
       NIMBUS_COMPONENT: api
       NIMBUS_HTTP_ADDRESS: :8080
       NIMBUS_DATABASE_URL: postgres://nimbus_api:nimbus-api-local@postgres:5432/nimbus?sslmode=disable
-      NIMBUS_API_KEY: ${NIMBUS_API_KEY:-nimbus-local-development-key}
+      NIMBUS_AWS_EXTERNAL_IDS: '{"aws-external-id/acme-prod":"customer-generated-value"}'
       NIMBUS_TENANT_ID: 00000000-0000-0000-0000-000000000001
       NIMBUS_TENANT_NAME: Nimbus Local
     ports:
@@ -31,7 +31,7 @@ services:
       NIMBUS_COMPONENT: worker
       NIMBUS_HTTP_ADDRESS: :8081
       NIMBUS_DATABASE_URL: postgres://nimbus_worker:nimbus-worker-local@postgres:5432/nimbus?sslmode=disable
-      NIMBUS_API_KEY: ${NIMBUS_API_KEY:-nimbus-local-development-key}
+      NIMBUS_AWS_EXTERNAL_IDS: '{"aws-external-id/acme-prod":"customer-generated-value"}'
       NIMBUS_TENANT_ID: 00000000-0000-0000-0000-000000000001
       NIMBUS_TENANT_NAME: Nimbus Local
       NIMBUS_WORKER_COUNT: 2

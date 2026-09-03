@@ -53,7 +53,8 @@ Send two consecutive five-minute observations to
 incident. Two healthy windows recover it.
 
 For real AWS mode, register `mode: aws`, a read-only `roleArn`, and an optional
-`externalIdEnv` containing only the environment-variable name. Then call
+opaque `externalIdRef` such as `aws-external-id/acme-prod`. The API resolves it
+only from the operator-managed `NIMBUS_AWS_EXTERNAL_IDS` JSON map. Then call
 `POST /v1/pipelines/{id}/checks`. Nimbus uses one bounded CloudWatch
 `GetMetricData` request for seven metrics. It never calls `ReceiveMessage` or
 CloudWatch Logs. Customer-side least-privilege Terraform is in
