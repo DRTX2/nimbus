@@ -134,7 +134,7 @@ revocado.
 
 ### Prioridad 1: Hosted Security
 
-- OIDC/JWKS con issuer, audience, algoritmos y cache acotados.
+- OIDC/JWKS con issuer, audience, algoritmos y cache acotados. (COMPLETADO)
 - Secret references en AWS SSM/Secrets Manager.
 - Webhooks firmados, rotacion y ventana antireplay.
 - Cuotas de ingestion, concurrencia y llamadas AWS por tenant.

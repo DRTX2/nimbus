@@ -38,6 +38,9 @@ type Config struct {
 	AWSExternalIDs             map[string]string
 	OIDCIssuer                 string
 	OIDCAudience               string
+	WebhookSecret              string
+	MaxIngestionRate           int
+	MaxConcurrentSteps         int
 }
 
 func Load() (Config, error) {
@@ -72,6 +75,9 @@ func Load() (Config, error) {
 		AWSExternalIDs:             externalIDs,
 		OIDCIssuer:                 strings.TrimSpace(os.Getenv("NIMBUS_OIDC_ISSUER")),
 		OIDCAudience:               strings.TrimSpace(os.Getenv("NIMBUS_OIDC_AUDIENCE")),
+		WebhookSecret:              strings.TrimSpace(os.Getenv("NIMBUS_WEBHOOK_SECRET")),
+		MaxIngestionRate:           envInt("NIMBUS_MAX_INGESTION_RATE", 1000),
+		MaxConcurrentSteps:         envInt("NIMBUS_MAX_CONCURRENT_STEPS", 50),
 	}
 
 	for _, host := range strings.Split(os.Getenv("NIMBUS_OUTBOUND_ALLOWED_HOSTS"), ",") {
@@ -102,6 +108,12 @@ func Load() (Config, error) {
 	}
 	if cfg.OIDCIssuer != "" && cfg.OIDCAudience == "" {
 		return Config{}, errors.New("NIMBUS_OIDC_AUDIENCE is required when NIMBUS_OIDC_ISSUER is set")
+	}
+	if cfg.MaxIngestionRate < 1 {
+		return Config{}, errors.New("NIMBUS_MAX_INGESTION_RATE must be greater than 0")
+	}
+	if cfg.MaxConcurrentSteps < 1 {
+		return Config{}, errors.New("NIMBUS_MAX_CONCURRENT_STEPS must be greater than 0")
 	}
 
 	return cfg, nil

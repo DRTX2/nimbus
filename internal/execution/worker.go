@@ -3,7 +3,9 @@ package execution
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,19 +29,22 @@ import (
 const maxResponseBytes = 64 << 10
 
 type Worker struct {
-	store         *store.Store
-	logger        *slog.Logger
-	metrics       *observability.Metrics
-	client        *http.Client
-	count         int
-	pollInterval  time.Duration
-	leaseDuration time.Duration
+	store              *store.Store
+	logger             *slog.Logger
+	metrics            *observability.Metrics
+	client             *http.Client
+	count              int
+	pollInterval       time.Duration
+	leaseDuration      time.Duration
+	webhookSecret      string
+	maxConcurrentSteps int
 }
 
-func NewWorker(store *store.Store, logger *slog.Logger, metrics *observability.Metrics, count int, pollInterval, leaseDuration time.Duration, allowedHosts []string) *Worker {
+func NewWorker(store *store.Store, logger *slog.Logger, metrics *observability.Metrics, count int, pollInterval, leaseDuration time.Duration, allowedHosts []string, webhookSecret string, maxConcurrentSteps int) *Worker {
 	return &Worker{
 		store: store, logger: logger, metrics: metrics, count: count,
 		pollInterval: pollInterval, leaseDuration: leaseDuration,
+		webhookSecret: webhookSecret, maxConcurrentSteps: maxConcurrentSteps,
 		client: secureHTTPClient(allowedHosts),
 	}
 }
@@ -76,7 +81,7 @@ func (w *Worker) loop(ctx context.Context, owner string) {
 }
 
 func (w *Worker) runOne(ctx context.Context, owner string) (bool, error) {
-	job, found, err := w.store.ClaimStep(ctx, owner, w.leaseDuration)
+	job, found, err := w.store.ClaimStep(ctx, owner, w.leaseDuration, w.maxConcurrentSteps)
 	if err != nil || !found {
 		return false, err
 	}
@@ -130,6 +135,15 @@ func (w *Worker) execute(parent context.Context, job store.Job) (json.RawMessage
 		}
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Idempotency-Key", job.ExecutionID+":"+job.StepID)
+		if w.webhookSecret != "" {
+			timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+			mac := hmac.New(sha256.New, []byte(w.webhookSecret))
+			mac.Write([]byte(timestamp + "."))
+			mac.Write(body)
+			signature := hex.EncodeToString(mac.Sum(nil))
+			request.Header.Set("Nimbus-Signature", "t="+timestamp+",v1="+signature)
+			request.Header.Set("Nimbus-Timestamp", timestamp)
+		}
 		response, err := w.client.Do(request)
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {

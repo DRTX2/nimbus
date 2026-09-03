@@ -12,6 +12,7 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrEventTypeMismatch = errors.New("event type does not match workflow trigger")
+var ErrRateLimitExceeded = errors.New("rate limit exceeded")
 
 func (s *Store) CreateWorkflow(ctx context.Context, actor Principal, name string, approvalRequired bool, definition workflow.Definition) (Workflow, error) {
 	encoded, err := json.Marshal(definition)
@@ -145,7 +146,7 @@ func (s *Store) ActivateWorkflowVersion(ctx context.Context, actor Principal, wo
 	return tx.Commit(ctx)
 }
 
-func (s *Store) IngestEvent(ctx context.Context, actor Principal, workflowID, externalID, eventType string, payload json.RawMessage) (IngestResult, error) {
+func (s *Store) IngestEvent(ctx context.Context, actor Principal, workflowID, externalID, eventType string, payload json.RawMessage, maxIngestionRate int) (IngestResult, error) {
 	tx, err := s.beginTenant(ctx, actor.TenantID)
 	if err != nil {
 		return IngestResult{}, fmt.Errorf("begin event ingestion: %w", err)
@@ -174,6 +175,14 @@ func (s *Store) IngestEvent(ctx context.Context, actor Principal, workflowID, ex
 	}
 	if eventType != definition.EventType {
 		return IngestResult{}, fmt.Errorf("%w: got %q, want %q", ErrEventTypeMismatch, eventType, definition.EventType)
+	}
+
+	var recentEvents int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM events WHERE tenant_id = $1 AND received_at >= now() - interval '1 minute'`, actor.TenantID).Scan(&recentEvents); err != nil {
+		return IngestResult{}, fmt.Errorf("check ingestion rate: %w", err)
+	}
+	if recentEvents >= maxIngestionRate {
+		return IngestResult{}, ErrRateLimitExceeded
 	}
 
 	var eventID string

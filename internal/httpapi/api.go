@@ -23,15 +23,16 @@ import (
 type principalContextKey struct{}
 
 type API struct {
-	store        *store.Store
-	metrics      *observability.Metrics
-	logger       *slog.Logger
-	awsCollector *awsmonitor.Collector
-	oidcIssuer   string
-	tenantID     string
+	store            *store.Store
+	metrics          *observability.Metrics
+	logger           *slog.Logger
+	awsCollector     *awsmonitor.Collector
+	oidcIssuer       string
+	tenantID         string
+	maxIngestionRate int
 }
 
-func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger, awsCollector *awsmonitor.Collector, oidcValidator *OIDCValidator, oidcIssuer, tenantID string) http.Handler {
+func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger, awsCollector *awsmonitor.Collector, oidcValidator *OIDCValidator, oidcIssuer, tenantID string, maxIngestionRate int) http.Handler {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID, middleware.Recoverer)
 	router.Use(requestLogger(logger))
@@ -51,7 +52,7 @@ func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger
 			Description: "Tenant-scoped Nimbus API token. The local development token is documented in the README.",
 		},
 	}
-	handler := &API{store: store, metrics: metrics, logger: logger, awsCollector: awsCollector, oidcIssuer: oidcIssuer, tenantID: tenantID}
+	handler := &API{store: store, metrics: metrics, logger: logger, awsCollector: awsCollector, oidcIssuer: oidcIssuer, tenantID: tenantID, maxIngestionRate: maxIngestionRate}
 	handler.register(api)
 
 	return otelhttp.NewHandler(router, "nimbus.http")
@@ -247,12 +248,15 @@ func (a *API) ingestEvent(ctx context.Context, input *ingestEventInput) (*ingest
 	if permissionErr != nil {
 		return nil, permissionErr
 	}
-	result, err := a.store.IngestEvent(ctx, actor, input.WorkflowID, input.IdempotencyKey, input.Body.Type, payload)
+	result, err := a.store.IngestEvent(ctx, actor, input.WorkflowID, input.IdempotencyKey, input.Body.Type, payload, a.maxIngestionRate)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, huma.Error404NotFound("workflow was not found or is inactive")
 	}
 	if errors.Is(err, store.ErrEventTypeMismatch) {
 		return nil, huma.Error400BadRequest("event type does not match the workflow trigger")
+	}
+	if errors.Is(err, store.ErrRateLimitExceeded) {
+		return nil, huma.Error429TooManyRequests("tenant ingestion rate limit exceeded")
 	}
 	if err != nil {
 		a.logger.Error("event ingestion failed", "error", err)

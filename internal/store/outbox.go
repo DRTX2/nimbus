@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -75,7 +76,7 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 				return err
 			}
 			payload, _ := json.Marshal(map[string]any{"incidentId": message.AggregateID, "source": "nimbus"})
-			if _, err := s.IngestEvent(ctx, actor, workflowID, "outbox-"+message.ID, "nimbus.incident.opened", payload); err != nil {
+			if _, err := s.IngestEvent(ctx, actor, workflowID, "outbox-"+message.ID, "nimbus.incident.opened", payload, math.MaxInt32); err != nil {
 				return fmt.Errorf("dispatch incident workflow: %w", err)
 			}
 		}

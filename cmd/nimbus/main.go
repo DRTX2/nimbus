@@ -77,7 +77,7 @@ func run(logger *slog.Logger) error {
 	metrics := observability.NewMetrics(runsWorkers)
 	var workers sync.WaitGroup
 	if runsWorkers {
-		worker := execution.NewWorker(repository, logger, metrics, cfg.WorkerCount, cfg.PollInterval, cfg.LeaseDuration, cfg.OutboundAllowedHosts)
+		worker := execution.NewWorker(repository, logger, metrics, cfg.WorkerCount, cfg.PollInterval, cfg.LeaseDuration, cfg.OutboundAllowedHosts, cfg.WebhookSecret, cfg.MaxConcurrentSteps)
 		publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
 		operationalMetrics := observability.NewOperationalRefresher(repository, metrics, logger, cfg.OperationalMetricsInterval)
 		workers.Add(3)
@@ -94,7 +94,7 @@ func run(logger *slog.Logger) error {
 				return err
 			}
 		}
-		handler = httpapi.New(repository, metrics, logger, awsmonitor.NewCollector(cfg.AWSExternalIDs), oidcValidator, cfg.OIDCIssuer, cfg.TenantID)
+		handler = httpapi.New(repository, metrics, logger, awsmonitor.NewCollector(cfg.AWSExternalIDs), oidcValidator, cfg.OIDCIssuer, cfg.TenantID, cfg.MaxIngestionRate)
 	}
 
 	server := &http.Server{

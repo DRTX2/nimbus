@@ -53,13 +53,13 @@ func (s *Store) GetExecution(ctx context.Context, tenantID, executionID string) 
 	return result, nil
 }
 
-func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.Duration) (Job, bool, error) {
+func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.Duration, maxConcurrentSteps int) (Job, bool, error) {
 	tenants, err := s.workerTenants(ctx, &s.stepCursor)
 	if err != nil {
 		return Job{}, false, err
 	}
 	for _, tenantID := range tenants {
-		job, found, err := s.claimTenantStep(ctx, tenantID, owner, leaseDuration)
+		job, found, err := s.claimTenantStep(ctx, tenantID, owner, leaseDuration, maxConcurrentSteps)
 		if err != nil || found {
 			return job, found, err
 		}
@@ -67,7 +67,7 @@ func (s *Store) ClaimStep(ctx context.Context, owner string, leaseDuration time.
 	return Job{}, false, nil
 }
 
-func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, leaseDuration time.Duration) (Job, bool, error) {
+func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, leaseDuration time.Duration, maxConcurrentSteps int) (Job, bool, error) {
 	tx, err := s.beginTenant(ctx, tenantID)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("begin step claim: %w", err)
@@ -107,6 +107,7 @@ func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, lea
 			   OR (s.status = 'running' AND s.lease_until < now()))
 			  AND s.attempt < s.max_attempts
 			  AND e.status IN ('queued', 'running')
+			  AND (SELECT count(*) FROM step_runs WHERE tenant_id = $1 AND status = 'running') < $3
 			ORDER BY s.available_at, s.created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -121,7 +122,7 @@ func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, lea
 			s.attempt, s.max_attempts, s.initial_delay_seconds, s.max_delay_seconds,
 			s.timeout_seconds, s.lease_owner,
 			(SELECT ev.payload FROM executions ex JOIN events ev ON ev.tenant_id=ex.tenant_id AND ev.id=ex.event_id
-			 WHERE ex.tenant_id=s.tenant_id AND ex.id=s.execution_id)`, owner, leaseDuration.Milliseconds()).
+			 WHERE ex.tenant_id=s.tenant_id AND ex.id=s.execution_id)`, owner, leaseDuration.Milliseconds(), maxConcurrentSteps).
 		Scan(&job.ID, &job.TenantID, &job.ExecutionID, &job.StepID, &job.StepType, &job.Config,
 			&job.Attempt, &job.MaxAttempts, &job.InitialDelaySeconds, &job.MaxDelaySeconds,
 			&job.TimeoutSeconds, &job.LeaseOwner, &job.EventPayload)
