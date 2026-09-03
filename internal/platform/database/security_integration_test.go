@@ -86,6 +86,25 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 		t.Fatalf("revoked API key authentication error = %v, want forbidden", err)
 	}
 
+	oidcPrincipal, _, err := apiStore.AuthenticateOIDC(ctx, tenantA, "https://nimbus.example.com", "user-123")
+	if err != nil {
+		t.Fatalf("authenticate OIDC first time: %v", err)
+	}
+	if oidcPrincipal.TenantID != tenantA {
+		t.Fatalf("OIDC authenticated tenant = %s, want %s", oidcPrincipal.TenantID, tenantA)
+	}
+	if oidcPrincipal.Role != "viewer" {
+		t.Fatalf("OIDC default role = %s, want viewer", oidcPrincipal.Role)
+	}
+
+	oidcPrincipal2, _, err := apiStore.AuthenticateOIDC(ctx, tenantA, "https://nimbus.example.com", "user-123")
+	if err != nil {
+		t.Fatalf("authenticate OIDC subsequent time: %v", err)
+	}
+	if oidcPrincipal2.ID != oidcPrincipal.ID {
+		t.Fatalf("OIDC subsequent login created new principal %s, want %s", oidcPrincipal2.ID, oidcPrincipal.ID)
+	}
+
 	workflowA := insertWorkflow(t, ctx, owner, tenantA, tenantA)
 	workflowB := insertWorkflow(t, ctx, owner, tenantB, tenantB)
 	assertAPIKeyBoundRLS(t, ctx, api, token, tenantA, tenantB, workflowA, workflowB)

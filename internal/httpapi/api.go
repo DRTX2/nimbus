@@ -27,14 +27,16 @@ type API struct {
 	metrics      *observability.Metrics
 	logger       *slog.Logger
 	awsCollector *awsmonitor.Collector
+	oidcIssuer   string
+	tenantID     string
 }
 
-func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger, awsCollector *awsmonitor.Collector) http.Handler {
+func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger, awsCollector *awsmonitor.Collector, oidcValidator *OIDCValidator, oidcIssuer, tenantID string) http.Handler {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID, middleware.Recoverer)
 	router.Use(requestLogger(logger))
 	router.Use(maxBodyBytes(1 << 20))
-	router.Use(authenticate(store, logger))
+	router.Use(authenticate(store, logger, oidcValidator, oidcIssuer, tenantID))
 	router.Handle("/metrics", metrics.Handler())
 
 	config := huma.DefaultConfig("Nimbus Async Pipeline Guardian API", "0.1.0")
@@ -49,7 +51,7 @@ func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger
 			Description: "Tenant-scoped Nimbus API token. The local development token is documented in the README.",
 		},
 	}
-	handler := &API{store: store, metrics: metrics, logger: logger, awsCollector: awsCollector}
+	handler := &API{store: store, metrics: metrics, logger: logger, awsCollector: awsCollector, oidcIssuer: oidcIssuer, tenantID: tenantID}
 	handler.register(api)
 
 	return otelhttp.NewHandler(router, "nimbus.http")
@@ -305,7 +307,7 @@ func (a *API) analytics(ctx context.Context, _ *struct{}) (*analyticsOutput, err
 	return &analyticsOutput{Body: result}, nil
 }
 
-func authenticate(repository *store.Store, logger *slog.Logger) func(http.Handler) http.Handler {
+func authenticate(repository *store.Store, logger *slog.Logger, oidcValidator *OIDCValidator, oidcIssuer, tenantID string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 			if !strings.HasPrefix(request.URL.Path, "/v1/") {
@@ -319,7 +321,25 @@ func authenticate(repository *store.Store, logger *slog.Logger) func(http.Handle
 				_, _ = response.Write([]byte(`{"title":"Unauthorized","status":401,"detail":"a valid bearer token is required"}`))
 				return
 			}
-			principal, capability, err := repository.AuthenticateAPIKey(request.Context(), token)
+			var principal store.Principal
+			var capability store.TenantCapability
+			var err error
+
+			if strings.HasPrefix(token, "ey") && oidcValidator != nil {
+				jwtToken, jwtErr := oidcValidator.ValidateToken(token)
+				if jwtErr != nil {
+					logger.Error("OIDC token validation failed", "error", jwtErr)
+					response.Header().Set("Content-Type", "application/problem+json")
+					response.WriteHeader(http.StatusUnauthorized)
+					_, _ = response.Write([]byte(`{"title":"Unauthorized","status":401,"detail":"a valid bearer token is required"}`))
+					return
+				}
+				sub, _ := jwtToken.Claims.GetSubject()
+				principal, capability, err = repository.AuthenticateOIDC(request.Context(), tenantID, oidcIssuer, sub)
+			} else {
+				principal, capability, err = repository.AuthenticateAPIKey(request.Context(), token)
+			}
+
 			if err != nil {
 				if err != nil && !errors.Is(err, store.ErrForbidden) {
 					logger.Error("authentication failed", "error", err)

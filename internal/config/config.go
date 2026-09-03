@@ -36,6 +36,8 @@ type Config struct {
 	OTLPEndpoint               string
 	OutboundAllowedHosts       []string
 	AWSExternalIDs             map[string]string
+	OIDCIssuer                 string
+	OIDCAudience               string
 }
 
 func Load() (Config, error) {
@@ -68,6 +70,8 @@ func Load() (Config, error) {
 		OperationalMetricsInterval: envDuration("NIMBUS_OPERATIONAL_METRICS_INTERVAL", 15*time.Second),
 		OTLPEndpoint:               strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
 		AWSExternalIDs:             externalIDs,
+		OIDCIssuer:                 strings.TrimSpace(os.Getenv("NIMBUS_OIDC_ISSUER")),
+		OIDCAudience:               strings.TrimSpace(os.Getenv("NIMBUS_OIDC_AUDIENCE")),
 	}
 
 	for _, host := range strings.Split(os.Getenv("NIMBUS_OUTBOUND_ALLOWED_HOSTS"), ",") {
@@ -95,6 +99,9 @@ func Load() (Config, error) {
 		if cfg.Environment != "development" && cfg.APIKey == developmentAPIKey {
 			return Config{}, errors.New("NIMBUS_API_KEY must be changed outside development")
 		}
+	}
+	if cfg.OIDCIssuer != "" && cfg.OIDCAudience == "" {
+		return Config{}, errors.New("NIMBUS_OIDC_AUDIENCE is required when NIMBUS_OIDC_ISSUER is set")
 	}
 
 	return cfg, nil

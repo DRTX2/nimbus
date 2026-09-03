@@ -87,7 +87,14 @@ func run(logger *slog.Logger) error {
 	}
 	handler := httpapi.NewOperational(repository, metrics, logger)
 	if cfg.Component == "all" || cfg.Component == "api" {
-		handler = httpapi.New(repository, metrics, logger, awsmonitor.NewCollector(cfg.AWSExternalIDs))
+		var oidcValidator *httpapi.OIDCValidator
+		if cfg.OIDCIssuer != "" {
+			oidcValidator, err = httpapi.NewOIDCValidator(cfg.OIDCIssuer, cfg.OIDCAudience)
+			if err != nil {
+				return err
+			}
+		}
+		handler = httpapi.New(repository, metrics, logger, awsmonitor.NewCollector(cfg.AWSExternalIDs), oidcValidator, cfg.OIDCIssuer, cfg.TenantID)
 	}
 
 	server := &http.Server{

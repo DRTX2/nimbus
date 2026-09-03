@@ -77,6 +77,59 @@ func (s *Store) AuthenticateAPIKey(ctx context.Context, token string) (Principal
 	return result, TenantCapability{hash: hash, valid: true}, nil
 }
 
+func (s *Store) AuthenticateOIDC(ctx context.Context, defaultTenantID, issuer, subject string) (Principal, TenantCapability, error) {
+	tx, err := s.beginTenant(ctx, defaultTenantID)
+	if err != nil {
+		return Principal{}, TenantCapability{}, fmt.Errorf("begin OIDC auth: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var result Principal
+	err = tx.QueryRow(ctx, `
+		SELECT p.id, m.tenant_id, p.display_name, m.role
+		FROM principals p
+		JOIN memberships m ON m.principal_id = p.id
+		WHERE p.kind = 'oidc' AND p.issuer = $1 AND p.subject = $2 AND m.tenant_id = $3`,
+		issuer, subject, defaultTenantID).Scan(&result.ID, &result.TenantID, &result.Name, &result.Role)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `
+			WITH inserted_principal AS (
+				INSERT INTO principals (kind, issuer, subject, display_name)
+				VALUES ('oidc', $1, $2, $3)
+				ON CONFLICT DO NOTHING RETURNING id
+			),
+			principal AS (
+				SELECT id FROM inserted_principal UNION ALL
+				SELECT id FROM principals WHERE issuer = $1 AND subject = $2 LIMIT 1
+			),
+			inserted_membership AS (
+				INSERT INTO memberships (tenant_id, principal_id, role)
+				SELECT $4, id, 'viewer' FROM principal
+				ON CONFLICT DO NOTHING RETURNING principal_id
+			)
+			SELECT p.id, $4::uuid, p.display_name, 'viewer'
+			FROM principal p`, issuer, subject, subject, defaultTenantID).Scan(&result.ID, &result.TenantID, &result.Name, &result.Role)
+
+		if err != nil {
+			return Principal{}, TenantCapability{}, fmt.Errorf("auto-provision OIDC: %w", err)
+		}
+
+		if err := insertAudit(ctx, tx, result, "oidc.provision", "principal", result.ID, "succeeded", map[string]any{"role": "viewer"}); err != nil {
+			return Principal{}, TenantCapability{}, err
+		}
+	} else if err != nil {
+		return Principal{}, TenantCapability{}, fmt.Errorf("query OIDC principal: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Principal{}, TenantCapability{}, fmt.Errorf("commit OIDC auth: %w", err)
+	}
+
+	hash := sha256.Sum256([]byte(issuer + "|" + subject))
+	return result, TenantCapability{hash: hash, valid: true}, nil
+}
+
 func (s *Store) CreateAPIKey(ctx context.Context, actor Principal, name, role, token string, expiresAt *time.Time) (APIKey, error) {
 	if role != "owner" && role != "operator" && role != "approver" && role != "viewer" {
 		return APIKey{}, fmt.Errorf("invalid role %q", role)
