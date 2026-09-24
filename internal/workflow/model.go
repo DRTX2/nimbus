@@ -12,7 +12,7 @@ import (
 const SchemaVersion = 1
 
 type Definition struct {
-	SchemaVersion int    `json:"schemaVersion" doc:"Workflow contract version" example:"1"`
+	SchemaVersion int    `json:"schemaVersion,omitempty" doc:"Workflow contract version; defaults to the latest." example:"1"`
 	EventType     string `json:"eventType" minLength:"1" maxLength:"100" example:"order.created"`
 	Steps         []Step `json:"steps" minItems:"1" maxItems:"50"`
 }
