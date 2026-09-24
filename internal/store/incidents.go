@@ -239,27 +239,49 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 			}
 			changed = append(changed, incident)
 		} else if counts[name] == 0 {
-			rows, err := tx.Query(ctx, `UPDATE incidents SET status='recovered',recovered_at=now(),updated_at=now()
-				WHERE tenant_id=$1 AND pipeline_id=$2 AND detector=$3 AND status IN ('open','acknowledged') RETURNING id`, actor.TenantID, observation.PipelineID, name)
-			if err != nil {
-				return nil, fmt.Errorf("recover incident: %w", err)
+			if err := recoverIncidents(ctx, tx, actor, observation.PipelineID, name); err != nil {
+				return nil, err
 			}
-			for rows.Next() {
-				var id string
-				if err := rows.Scan(&id); err != nil {
-					rows.Close()
-					return nil, err
-				}
-				_, _ = tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,actor_id) VALUES ($1,$2,'recovered',$3)`, actor.TenantID, id, actor.ID)
-				_ = insertOutbox(ctx, tx, actor.TenantID, "incident.recovered", "incident", id, "incident:"+id+":recovered", map[string]any{"incidentId": id})
-			}
-			rows.Close()
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit observation evaluation: %w", err)
 	}
 	return changed, nil
+}
+
+// recoverIncidents closes active incidents for a detector after sustained
+// healthy windows. IDs are collected before further statements because a pgx
+// connection cannot execute while a result set is open.
+func recoverIncidents(ctx context.Context, tx pgx.Tx, actor Principal, pipelineID, detectorName string) error {
+	rows, err := tx.Query(ctx, `UPDATE incidents SET status='recovered',recovered_at=now(),updated_at=now()
+		WHERE tenant_id=$1 AND pipeline_id=$2 AND detector=$3 AND status IN ('open','acknowledged') RETURNING id`,
+		actor.TenantID, pipelineID, detectorName)
+	if err != nil {
+		return fmt.Errorf("recover incident: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan recovered incident: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate recovered incidents: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,actor_id) VALUES ($1,$2,'recovered',$3)`, actor.TenantID, id, actor.ID); err != nil {
+			return fmt.Errorf("append recovery timeline: %w", err)
+		}
+		if err := insertOutbox(ctx, tx, actor.TenantID, "incident.recovered", "incident", id, "incident:"+id+":recovered", map[string]any{"incidentId": id}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Windows are ordered newest first. Exact UTC boundaries prevent overlapping

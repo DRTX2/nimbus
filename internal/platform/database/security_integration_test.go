@@ -130,7 +130,7 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 	var job store.Job
 	var found bool
 	for range 20 {
-		job, found, err = workerStore.ClaimStep(ctx, "integration-worker", time.Minute)
+		job, found, err = workerStore.ClaimStep(ctx, "integration-worker", time.Minute, 50)
 		if err != nil || found {
 			break
 		}

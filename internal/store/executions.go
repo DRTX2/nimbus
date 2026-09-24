@@ -107,7 +107,7 @@ func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, lea
 			   OR (s.status = 'running' AND s.lease_until < now()))
 			  AND s.attempt < s.max_attempts
 			  AND e.status IN ('queued', 'running')
-			  AND (SELECT count(*) FROM step_runs WHERE tenant_id = $1 AND status = 'running') < $3
+			  AND (SELECT count(*) FROM step_runs WHERE tenant_id = $4 AND status = 'running') < $3
 			ORDER BY s.available_at, s.created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -122,7 +122,7 @@ func (s *Store) claimTenantStep(ctx context.Context, tenantID, owner string, lea
 			s.attempt, s.max_attempts, s.initial_delay_seconds, s.max_delay_seconds,
 			s.timeout_seconds, s.lease_owner,
 			(SELECT ev.payload FROM executions ex JOIN events ev ON ev.tenant_id=ex.tenant_id AND ev.id=ex.event_id
-			 WHERE ex.tenant_id=s.tenant_id AND ex.id=s.execution_id)`, owner, leaseDuration.Milliseconds(), maxConcurrentSteps).
+			 WHERE ex.tenant_id=s.tenant_id AND ex.id=s.execution_id)`, owner, leaseDuration.Milliseconds(), maxConcurrentSteps, tenantID).
 		Scan(&job.ID, &job.TenantID, &job.ExecutionID, &job.StepID, &job.StepType, &job.Config,
 			&job.Attempt, &job.MaxAttempts, &job.InitialDelaySeconds, &job.MaxDelaySeconds,
 			&job.TimeoutSeconds, &job.LeaseOwner, &job.EventPayload)
