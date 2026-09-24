@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,8 +43,11 @@ func TestForbiddenIP(t *testing.T) {
 		{address: "127.0.0.1", want: true},
 		{address: "10.0.0.1", want: true},
 		{address: "169.254.169.254", want: true},
+		{address: "100.64.0.1", want: true},
+		{address: "0.1.2.3", want: true},
 		{address: "::1", want: true},
 		{address: "::ffff:127.0.0.1", want: true},
+		{address: "fd00:ec2::254", want: true},
 		{address: "1.1.1.1", want: false},
 	}
 	for _, test := range tests {
@@ -70,41 +75,92 @@ func TestSecureHTTPClientIgnoresEnvironmentProxies(t *testing.T) {
 	}
 }
 
-func TestExecuteSignedWebhook(t *testing.T) {
+func httpJob(url string, timeout int) store.Job {
+	return store.Job{
+		StepType: "http", ExecutionID: "exec", StepID: "notify", TimeoutSeconds: timeout,
+		Config: json.RawMessage(fmt.Sprintf(`{"url":%q,"method":"POST","body":"test-body","bodyMode":"static"}`, url)),
+	}
+}
+
+// The connector error classification decides whether an external effect may be
+// repeated, so every status class and transport failure is pinned here.
+func TestHTTPConnectorErrorClassification(t *testing.T) {
+	tests := []struct {
+		status    int
+		wantErr   bool
+		retryable bool
+	}{
+		{status: http.StatusNoContent},
+		{status: http.StatusBadRequest, wantErr: true},
+		{status: http.StatusNotFound, wantErr: true},
+		{status: http.StatusRequestTimeout, wantErr: true, retryable: true},
+		{status: http.StatusTooManyRequests, wantErr: true, retryable: true},
+		{status: http.StatusBadGateway, wantErr: true, retryable: true},
+	}
+	for _, test := range tests {
+		t.Run(http.StatusText(test.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(test.status) }))
+			defer server.Close()
+			connector := &HTTPConnector{client: server.Client()}
+			_, err := connector.Execute(context.Background(), httpJob(server.URL, 5))
+			if (err != nil) != test.wantErr || IsRetryable(err) != test.retryable {
+				t.Fatalf("status %d: err=%v retryable=%v", test.status, err, IsRetryable(err))
+			}
+		})
+	}
+}
+
+func TestHTTPConnectorTimeoutIsRetryable(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { <-release }))
+	defer server.Close()
+	defer close(release)
+	connector := &HTTPConnector{client: server.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := connector.Execute(ctx, httpJob(server.URL, 1))
+	if err == nil || !IsRetryable(err) || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout error = %v, retryable=%v", err, IsRetryable(err))
+	}
+}
+
+func TestHTTPConnectorBlocksPrivateDestinations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("request reached a loopback destination")
+	}))
+	defer server.Close()
+	_, err := NewHTTPConnector(nil, nil).Execute(context.Background(), httpJob(server.URL, 5))
+	if !errors.Is(err, errBlockedDestination) || IsRetryable(err) {
+		t.Fatalf("private destination error = %v, retryable=%v", err, IsRetryable(err))
+	}
+}
+
+func TestSignerSupportsRotation(t *testing.T) {
 	var gotSignature, gotTimestamp string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSignature = r.Header.Get("Nimbus-Signature")
-		gotTimestamp = r.Header.Get("Nimbus-Timestamp")
+		gotSignature, gotTimestamp = r.Header.Get("Nimbus-Signature"), r.Header.Get("Nimbus-Timestamp")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-
-	worker := NewWorker(nil, nil, nil, 1, 0, 0, nil, "secret123", 50)
-	worker.client = server.Client() // bypass secureHTTPClient IP blocking
-
-	config := fmt.Sprintf(`{"url": "%s", "method": "POST", "body": "test-body"}`, server.URL)
-	job := store.Job{
-		StepType:       "http",
-		Config:         json.RawMessage(config),
-		TimeoutSeconds: 5,
+	connector := &HTTPConnector{client: server.Client(), signer: NewSigner("current-secret", "previous-secret")}
+	if _, err := connector.Execute(context.Background(), httpJob(server.URL, 5)); err != nil {
+		t.Fatalf("execute: %v", err)
 	}
+	want := []string{"t=" + gotTimestamp}
+	for _, secret := range []string{"current-secret", "previous-secret"} {
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(gotTimestamp + "."))
+		mac.Write([]byte("test-body"))
+		want = append(want, "v1="+hex.EncodeToString(mac.Sum(nil)))
+	}
+	if gotSignature != strings.Join(want, ",") {
+		t.Fatalf("signature %q, want %q", gotSignature, strings.Join(want, ","))
+	}
+}
 
-	_, retryable, err := worker.execute(context.Background(), job)
-	if err != nil {
-		t.Fatalf("execute failed: %v", err)
-	}
-	if retryable {
-		t.Fatalf("execute should not be retryable")
-	}
-
-	if gotSignature == "" {
-		t.Fatalf("expected Nimbus-Signature header")
-	}
-	mac := hmac.New(sha256.New, []byte("secret123"))
-	mac.Write([]byte(gotTimestamp + "."))
-	mac.Write([]byte("test-body"))
-	expected := "t=" + gotTimestamp + ",v1=" + hex.EncodeToString(mac.Sum(nil))
-	if gotSignature != expected {
-		t.Fatalf("got signature %q, want %q", gotSignature, expected)
+func TestUnknownStepTypeIsPermanent(t *testing.T) {
+	_, err := Registry{}.execute(context.Background(), store.Job{StepType: "carrier-pigeon"})
+	if err == nil || IsRetryable(err) {
+		t.Fatalf("unknown connector error = %v", err)
 	}
 }

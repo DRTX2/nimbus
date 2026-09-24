@@ -1,75 +1,68 @@
 package execution
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
-	"net"
-	"net/http"
-	"net/netip"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/david/nimbus/internal/platform/observability"
 	"github.com/david/nimbus/internal/store"
-	"github.com/david/nimbus/internal/workflow"
 )
 
-const maxResponseBytes = 64 << 10
-
-type Worker struct {
-	store              *store.Store
-	logger             *slog.Logger
-	metrics            *observability.Metrics
-	client             *http.Client
-	count              int
-	pollInterval       time.Duration
-	leaseDuration      time.Duration
-	webhookSecret      string
-	maxConcurrentSteps int
+// WorkerConfig bounds worker concurrency and lease behavior.
+type WorkerConfig struct {
+	Count              int
+	PollInterval       time.Duration
+	LeaseDuration      time.Duration
+	MaxConcurrentSteps int
 }
 
-func NewWorker(store *store.Store, logger *slog.Logger, metrics *observability.Metrics, count int, pollInterval, leaseDuration time.Duration, allowedHosts []string, webhookSecret string, maxConcurrentSteps int) *Worker {
-	return &Worker{
-		store: store, logger: logger, metrics: metrics, count: count,
-		pollInterval: pollInterval, leaseDuration: leaseDuration,
-		webhookSecret: webhookSecret, maxConcurrentSteps: maxConcurrentSteps,
-		client: secureHTTPClient(allowedHosts),
+// Worker claims durable steps from PostgreSQL and executes them through the
+// connector registry. Execution is at-least-once.
+type Worker struct {
+	store      *store.Store
+	logger     *slog.Logger
+	metrics    *observability.Metrics
+	connectors Registry
+	config     WorkerConfig
+}
+
+// DefaultConnectors returns the built-in step types.
+func DefaultConnectors(allowedHosts []string, signer *Signer) Registry {
+	return Registry{
+		"noop": noopConnector,
+		"http": NewHTTPConnector(allowedHosts, signer),
 	}
+}
+
+func NewWorker(repository *store.Store, logger *slog.Logger, metrics *observability.Metrics, connectors Registry, config WorkerConfig) *Worker {
+	return &Worker{store: repository, logger: logger, metrics: metrics, connectors: connectors, config: config}
 }
 
 func (w *Worker) Run(ctx context.Context) {
 	var group sync.WaitGroup
-	for index := 0; index < w.count; index++ {
-		group.Add(1)
-		go func(index int) {
-			defer group.Done()
-			w.loop(ctx, workerID(index))
-		}(index)
+	for index := range w.config.Count {
+		group.Go(func() { w.loop(ctx, workerID(index)) })
 	}
 	group.Wait()
 }
 
 func (w *Worker) loop(ctx context.Context, owner string) {
-	ticker := time.NewTicker(w.pollInterval)
+	ticker := time.NewTicker(w.config.PollInterval)
 	defer ticker.Stop()
 	for {
 		worked, err := w.runOne(ctx, owner)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			w.logger.Error("worker iteration failed", "worker_id", owner, "error", err)
 		}
-		if worked {
+		if worked && ctx.Err() == nil {
 			continue
 		}
 		select {
@@ -81,16 +74,21 @@ func (w *Worker) loop(ctx context.Context, owner string) {
 }
 
 func (w *Worker) runOne(ctx context.Context, owner string) (bool, error) {
-	job, found, err := w.store.ClaimStep(ctx, owner, w.leaseDuration, w.maxConcurrentSteps)
+	job, found, err := w.store.ClaimStep(ctx, owner, w.config.LeaseDuration, w.config.MaxConcurrentSteps)
 	if err != nil || !found {
 		return false, err
 	}
 	started := time.Now()
-	output, retryable, err := w.execute(ctx, job)
+	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(job.TimeoutSeconds)*time.Second)
+	output, err := w.connectors.execute(stepCtx, job)
+	cancel()
 	w.metrics.StepDuration.WithLabelValues(job.StepType).Observe(time.Since(started).Seconds())
+	// Persist the outcome even during shutdown so a finished effect is not re-run.
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer persistCancel()
 	if err == nil {
 		w.metrics.StepsCompleted.WithLabelValues(job.StepType, "succeeded").Inc()
-		if err := w.store.CompleteStep(ctx, job, output); err != nil {
+		if err := w.store.CompleteStep(persistCtx, job, output); err != nil {
 			return true, fmt.Errorf("complete job %s: %w", job.ID, err)
 		}
 		w.logger.Info("step succeeded", "execution_id", job.ExecutionID, "step_id", job.StepID, "attempt", job.Attempt)
@@ -100,73 +98,17 @@ func (w *Worker) runOne(ctx context.Context, owner string) (bool, error) {
 	w.metrics.StepsCompleted.WithLabelValues(job.StepType, "failed").Inc()
 	message := safeError(err)
 	var retryAt *time.Time
-	if retryable && job.Attempt < job.MaxAttempts {
+	if IsRetryable(err) && job.Attempt < job.MaxAttempts {
 		delay := backoff(job.Attempt, time.Duration(job.InitialDelaySeconds)*time.Second, time.Duration(job.MaxDelaySeconds)*time.Second)
 		next := time.Now().Add(delay)
 		retryAt = &next
 	}
-	if persistErr := w.store.FailStep(ctx, job, message, retryAt); persistErr != nil {
+	if persistErr := w.store.FailStep(persistCtx, job, message, retryAt); persistErr != nil {
 		return true, fmt.Errorf("persist job %s failure: %w", job.ID, persistErr)
 	}
 	w.logger.Warn("step failed", "execution_id", job.ExecutionID, "step_id", job.StepID,
 		"attempt", job.Attempt, "retryable", retryAt != nil, "error", message)
 	return true, nil
-}
-
-func (w *Worker) execute(parent context.Context, job store.Job) (json.RawMessage, bool, error) {
-	ctx, cancel := context.WithTimeout(parent, time.Duration(job.TimeoutSeconds)*time.Second)
-	defer cancel()
-
-	switch job.StepType {
-	case "noop":
-		return json.RawMessage(`{"result":"noop"}`), false, nil
-	case "http":
-		var config workflow.HTTPRequest
-		if err := json.Unmarshal(job.Config, &config); err != nil {
-			return nil, false, fmt.Errorf("decode HTTP step: %w", err)
-		}
-		body := []byte(config.Body)
-		if config.BodyMode == "event" {
-			body = job.EventPayload
-		}
-		request, err := http.NewRequestWithContext(ctx, config.Method, config.URL, bytes.NewReader(body))
-		if err != nil {
-			return nil, false, fmt.Errorf("build HTTP request: %w", err)
-		}
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Idempotency-Key", job.ExecutionID+":"+job.StepID)
-		if w.webhookSecret != "" {
-			timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-			mac := hmac.New(sha256.New, []byte(w.webhookSecret))
-			mac.Write([]byte(timestamp + "."))
-			mac.Write(body)
-			signature := hex.EncodeToString(mac.Sum(nil))
-			request.Header.Set("Nimbus-Signature", "t="+timestamp+",v1="+signature)
-			request.Header.Set("Nimbus-Timestamp", timestamp)
-		}
-		response, err := w.client.Do(request)
-		if err != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, true, errors.New("HTTP request timed out")
-			}
-			if errors.Is(ctx.Err(), context.Canceled) {
-				return nil, true, errors.New("HTTP request was cancelled")
-			}
-			return nil, true, errors.New("HTTP transport failed")
-		}
-		defer response.Body.Close()
-		if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes+1)); err != nil {
-			return nil, true, fmt.Errorf("read HTTP response: %w", err)
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			retryable := response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
-			return nil, retryable, fmt.Errorf("HTTP destination returned status %d", response.StatusCode)
-		}
-		output, _ := json.Marshal(map[string]any{"statusCode": response.StatusCode})
-		return output, false, nil
-	default:
-		return nil, false, fmt.Errorf("unsupported step type %q", job.StepType)
-	}
 }
 
 func backoff(attempt int, initial, maximum time.Duration) time.Duration {
@@ -194,50 +136,4 @@ func safeError(err error) string {
 		return message[:500]
 	}
 	return message
-}
-
-func secureHTTPClient(allowedHosts []string) *http.Client {
-	allowed := make(map[string]struct{}, len(allowedHosts))
-	for _, host := range allowedHosts {
-		allowed[strings.ToLower(host)] = struct{}{}
-	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
-	transport := &http.Transport{
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-	}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, fmt.Errorf("parse destination: %w", err)
-		}
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil {
-			return nil, fmt.Errorf("resolve destination: %w", err)
-		}
-		_, explicitlyAllowed := allowed[strings.ToLower(host)]
-		for _, ip := range ips {
-			if !explicitlyAllowed && forbiddenIP(ip) {
-				continue
-			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-		}
-		return nil, errors.New("destination resolves only to blocked private or local addresses")
-	}
-	return &http.Client{
-		Transport: transport,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
-func forbiddenIP(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	return !ip.IsValid() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }

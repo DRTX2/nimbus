@@ -77,7 +77,11 @@ func run(logger *slog.Logger) error {
 	metrics := observability.NewMetrics(runsWorkers)
 	var workers sync.WaitGroup
 	if runsWorkers {
-		worker := execution.NewWorker(repository, logger, metrics, cfg.WorkerCount, cfg.PollInterval, cfg.LeaseDuration, cfg.OutboundAllowedHosts, cfg.WebhookSecret, cfg.MaxConcurrentSteps)
+		connectors := execution.DefaultConnectors(cfg.OutboundAllowedHosts, execution.NewSigner(cfg.WebhookSecret))
+		worker := execution.NewWorker(repository, logger, metrics, connectors, execution.WorkerConfig{
+			Count: cfg.WorkerCount, PollInterval: cfg.PollInterval,
+			LeaseDuration: cfg.LeaseDuration, MaxConcurrentSteps: cfg.MaxConcurrentSteps,
+		})
 		publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
 		operationalMetrics := observability.NewOperationalRefresher(repository, metrics, logger, cfg.OperationalMetricsInterval)
 		workers.Add(3)
