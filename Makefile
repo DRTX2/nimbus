@@ -1,7 +1,7 @@
 .PHONY: fmt vet test test-race test-db test-integration test-acceptance test-smoke openapi web-install web-verify web-build e2e test-all build verify security observability validate-deploy dev dev-split dev-down logs clean
 
 fmt:
-	gofmt -w .
+	gofmt -w cmd internal test
 
 vet:
 	go vet ./...
