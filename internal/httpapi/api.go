@@ -20,44 +20,76 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-type principalContextKey struct{}
+// Version is the public API contract version reported in OpenAPI.
+const Version = "0.2.0"
+
+const maxRequestBodyBytes = 1 << 20
+
+// Options wires the API to its collaborators. Optional fields may be nil.
+type Options struct {
+	Store            *store.Store
+	Metrics          *observability.Metrics
+	Logger           *slog.Logger
+	AWSCollector     *awsmonitor.Collector
+	OIDC             *OIDCVerifier
+	MaxIngestionRate int
+	// WebDir, when set, serves the built dashboard at /app/.
+	WebDir string
+}
 
 type API struct {
 	store            *store.Store
 	metrics          *observability.Metrics
 	logger           *slog.Logger
 	awsCollector     *awsmonitor.Collector
-	oidcIssuer       string
-	tenantID         string
 	maxIngestionRate int
 }
 
-func New(store *store.Store, metrics *observability.Metrics, logger *slog.Logger, awsCollector *awsmonitor.Collector, oidcValidator *OIDCValidator, oidcIssuer, tenantID string, maxIngestionRate int) http.Handler {
+// New builds the public HTTP handler: middleware, OpenAPI operations, Scalar
+// documentation, metrics, and the optional dashboard.
+func New(options Options) http.Handler {
 	router := chi.NewRouter()
-	router.Use(middleware.RequestID, middleware.Recoverer)
-	router.Use(requestLogger(logger))
-	router.Use(maxBodyBytes(1 << 20))
-	router.Use(authenticate(store, logger, oidcValidator, oidcIssuer, tenantID))
-	router.Handle("/metrics", metrics.Handler())
-
-	config := huma.DefaultConfig("Nimbus Async Pipeline Guardian API", "0.1.0")
-	config.Info.Description = "Explainable AWS asynchronous-pipeline incidents backed by reliable, tenant-scoped workflow execution."
-	config.DocsRenderer = huma.DocsRendererScalar
-	config.DocsRendererConfig = map[string]any{"theme": "deepSpace", "hideModels": false}
-	api := humachi.New(router, config)
-	api.OpenAPI().Components.SecuritySchemes = map[string]*huma.SecurityScheme{
-		"bearerAuth": {
-			Type:        "http",
-			Scheme:      "bearer",
-			Description: "Tenant-scoped Nimbus API token. The local development token is documented in the README.",
-		},
+	router.Use(middleware.RequestID, middleware.Recoverer, securityHeaders)
+	router.Use(requestLogger(options.Logger))
+	router.Use(maxBodyBytes(maxRequestBodyBytes))
+	router.Use(newAuthenticator(options.Store, options.OIDC, options.Logger).middleware)
+	router.Handle("/metrics", options.Metrics.Handler())
+	if options.WebDir != "" {
+		mountDashboard(router, options.WebDir)
 	}
-	handler := &API{store: store, metrics: metrics, logger: logger, awsCollector: awsCollector, oidcIssuer: oidcIssuer, tenantID: tenantID, maxIngestionRate: maxIngestionRate}
-	handler.register(api)
 
+	api := humachi.New(router, apiConfig())
+	handler := &API{
+		store: options.Store, metrics: options.Metrics, logger: options.Logger,
+		awsCollector: options.AWSCollector, maxIngestionRate: options.MaxIngestionRate,
+	}
+	handler.register(api)
 	return otelhttp.NewHandler(router, "nimbus.http")
 }
 
+// OpenAPISpec renders the contract without any runtime dependencies. It is
+// used to generate the checked-in snapshot consumed by the dashboard.
+func OpenAPISpec() ([]byte, error) {
+	api := humachi.New(chi.NewRouter(), apiConfig())
+	(&API{}).register(api)
+	return json.MarshalIndent(api.OpenAPI(), "", "  ")
+}
+
+func apiConfig() huma.Config {
+	config := huma.DefaultConfig("Nimbus Async Pipeline Guardian API", Version)
+	config.Info.Description = "Explainable AWS asynchronous-pipeline incidents backed by reliable, tenant-scoped workflow execution."
+	config.DocsRenderer = huma.DocsRendererScalar
+	config.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"bearerAuth": {
+			Type:        "http",
+			Scheme:      "bearer",
+			Description: "Tenant-scoped Nimbus API key or OIDC access token.",
+		},
+	}
+	return config
+}
+
+// NewOperational serves health and metrics for worker-only processes.
 func NewOperational(repository *store.Store, metrics *observability.Metrics, logger *slog.Logger) http.Handler {
 	router := chi.NewRouter()
 	router.Get("/health/live", func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) })
@@ -90,17 +122,14 @@ func (a *API) register(api huma.API) {
 			return &healthOutput{Body: healthBody{Status: "ok"}}, nil
 		})
 
-	createWorkflowOperation := securedOperation("createWorkflow", http.MethodPost, "/v1/workflows", "Workflows")
-	createWorkflowOperation.DefaultStatus = http.StatusCreated
-	huma.Register(api, createWorkflowOperation, a.createWorkflow)
+	huma.Register(api, securedOperation("getCurrentPrincipal", http.MethodGet, "/v1/me", "Identity"), a.me)
+	huma.Register(api, withStatus(securedOperation("createWorkflow", http.MethodPost, "/v1/workflows", "Workflows"), http.StatusCreated), a.createWorkflow)
 	huma.Register(api, securedOperation("listWorkflows", http.MethodGet, "/v1/workflows", "Workflows"), a.listWorkflows)
-	createVersion := securedOperation("createWorkflowVersion", http.MethodPost, "/v1/workflows/{workflowId}/versions", "Workflows")
-	createVersion.DefaultStatus = http.StatusCreated
-	huma.Register(api, createVersion, a.createWorkflowVersion)
+	huma.Register(api, securedOperation("getWorkflow", http.MethodGet, "/v1/workflows/{workflowId}", "Workflows"), a.getWorkflow)
+	huma.Register(api, withStatus(securedOperation("createWorkflowVersion", http.MethodPost, "/v1/workflows/{workflowId}/versions", "Workflows"), http.StatusCreated), a.createWorkflowVersion)
 	huma.Register(api, securedOperation("activateWorkflowVersion", http.MethodPost, "/v1/workflows/{workflowId}/versions/{version}/activations", "Workflows"), a.activateWorkflowVersion)
-	ingestEventOperation := securedOperation("ingestEvent", http.MethodPost, "/v1/workflows/{workflowId}/events", "Events")
-	ingestEventOperation.DefaultStatus = http.StatusAccepted
-	huma.Register(api, ingestEventOperation, a.ingestEvent)
+	huma.Register(api, withStatus(securedOperation("ingestEvent", http.MethodPost, "/v1/workflows/{workflowId}/events", "Events"), http.StatusAccepted), a.ingestEvent)
+	huma.Register(api, securedOperation("listExecutions", http.MethodGet, "/v1/executions", "Executions"), a.listExecutions)
 	huma.Register(api, securedOperation("getExecution", http.MethodGet, "/v1/executions/{executionId}", "Executions"), a.getExecution)
 	huma.Register(api, securedOperation("analyticsOverview", http.MethodGet, "/v1/analytics/overview", "Analytics"), a.analytics)
 	a.registerGovernance(api)
@@ -114,12 +143,42 @@ func securedOperation(id, method, path, tag string) huma.Operation {
 	}
 }
 
+func withStatus(operation huma.Operation, status int) huma.Operation {
+	operation.DefaultStatus = status
+	return operation
+}
+
+// internalError logs the cause server-side and returns a generic problem so
+// storage details never reach clients.
+func (a *API) internalError(message string, err error) error {
+	a.logger.Error(message, "error", err)
+	return huma.Error500InternalServerError(message)
+}
+
 type healthBody struct {
 	Status string `json:"status" example:"ok"`
 }
 
 type healthOutput struct {
 	Body healthBody
+}
+
+type meOutput struct {
+	Body struct {
+		store.Principal
+		Permissions []Permission `json:"permissions"`
+	}
+}
+
+func (a *API) me(ctx context.Context, _ *struct{}) (*meOutput, error) {
+	principal := principalFrom(ctx)
+	if principal.ID == "" {
+		return nil, huma.Error401Unauthorized("authentication is required")
+	}
+	out := &meOutput{}
+	out.Body.Principal = principal
+	out.Body.Permissions = permissionsFor(principal.Role)
+	return out, nil
 }
 
 type createWorkflowInput struct {
@@ -135,6 +194,10 @@ type workflowOutput struct {
 }
 
 func (a *API) createWorkflow(ctx context.Context, input *createWorkflowInput) (*workflowOutput, error) {
+	actor, err := requirePermission(ctx, PermWorkflowWrite)
+	if err != nil {
+		return nil, err
+	}
 	input.Body.Name = strings.TrimSpace(input.Body.Name)
 	if input.Body.Name == "" {
 		return nil, huma.Error400BadRequest("workflow name is required")
@@ -142,14 +205,9 @@ func (a *API) createWorkflow(ctx context.Context, input *createWorkflowInput) (*
 	if err := input.Body.Definition.NormalizeAndValidate(); err != nil {
 		return nil, huma.Error400BadRequest("invalid workflow", err)
 	}
-	actor, err := requirePermission(ctx, "workflow:write")
-	if err != nil {
-		return nil, err
-	}
 	created, err := a.store.CreateWorkflow(ctx, actor, input.Body.Name, input.Body.ApprovalRequired, input.Body.Definition)
 	if err != nil {
-		a.logger.Error("create workflow failed", "error", err)
-		return nil, huma.Error500InternalServerError("could not create workflow")
+		return nil, a.internalError("could not create workflow", err)
 	}
 	return &workflowOutput{Body: created}, nil
 }
@@ -161,18 +219,40 @@ type workflowsOutput struct {
 }
 
 func (a *API) listWorkflows(ctx context.Context, _ *struct{}) (*workflowsOutput, error) {
-	actor, err := requirePermission(ctx, "workflow:read")
+	actor, err := requirePermission(ctx, PermWorkflowRead)
 	if err != nil {
 		return nil, err
 	}
 	items, err := a.store.ListWorkflows(ctx, actor.TenantID)
 	if err != nil {
-		a.logger.Error("list workflows failed", "error", err)
-		return nil, huma.Error500InternalServerError("could not list workflows")
+		return nil, a.internalError("could not list workflows", err)
 	}
 	output := &workflowsOutput{}
 	output.Body.Items = items
 	return output, nil
+}
+
+type workflowPathInput struct {
+	WorkflowID string `path:"workflowId" format:"uuid"`
+}
+
+type workflowDetailOutput struct {
+	Body store.WorkflowDetail
+}
+
+func (a *API) getWorkflow(ctx context.Context, input *workflowPathInput) (*workflowDetailOutput, error) {
+	actor, err := requirePermission(ctx, PermWorkflowRead)
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.store.GetWorkflow(ctx, actor.TenantID, input.WorkflowID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, huma.Error404NotFound("workflow was not found")
+	}
+	if err != nil {
+		return nil, a.internalError("could not load workflow", err)
+	}
+	return &workflowDetailOutput{Body: result}, nil
 }
 
 type createWorkflowVersionInput struct {
@@ -181,7 +261,7 @@ type createWorkflowVersionInput struct {
 }
 
 func (a *API) createWorkflowVersion(ctx context.Context, input *createWorkflowVersionInput) (*workflowOutput, error) {
-	actor, err := requirePermission(ctx, "workflow:write")
+	actor, err := requirePermission(ctx, PermWorkflowWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -189,8 +269,11 @@ func (a *API) createWorkflowVersion(ctx context.Context, input *createWorkflowVe
 		return nil, huma.Error400BadRequest("invalid workflow", err)
 	}
 	result, err := a.store.CreateWorkflowVersion(ctx, actor, input.WorkflowID, input.Body)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, huma.Error404NotFound("workflow was not found")
+	}
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not create workflow version")
+		return nil, a.internalError("could not create workflow version", err)
 	}
 	return &workflowOutput{Body: result}, nil
 }
@@ -199,14 +282,21 @@ type activateWorkflowVersionInput struct {
 	WorkflowID string `path:"workflowId" format:"uuid"`
 	Version    int    `path:"version" minimum:"1"`
 }
+
 type statusOutput struct {
 	Body struct {
 		Status string `json:"status"`
 	}
 }
 
+func newStatusOutput(status string) *statusOutput {
+	out := &statusOutput{}
+	out.Body.Status = status
+	return out
+}
+
 func (a *API) activateWorkflowVersion(ctx context.Context, input *activateWorkflowVersionInput) (*statusOutput, error) {
-	actor, err := requirePermission(ctx, "workflow:write")
+	actor, err := requirePermission(ctx, PermWorkflowWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -215,11 +305,9 @@ func (a *API) activateWorkflowVersion(ctx context.Context, input *activateWorkfl
 		return nil, huma.Error404NotFound("workflow version was not found")
 	}
 	if err != nil {
-		return nil, huma.Error500InternalServerError("workflow version could not be activated")
+		return nil, a.internalError("workflow version could not be activated", err)
 	}
-	out := &statusOutput{}
-	out.Body.Status = "active"
-	return out, nil
+	return newStatusOutput("active"), nil
 }
 
 type ingestEventInput struct {
@@ -237,30 +325,30 @@ type ingestEventOutput struct {
 }
 
 func (a *API) ingestEvent(ctx context.Context, input *ingestEventInput) (*ingestEventOutput, error) {
+	actor, err := requirePermission(ctx, PermEventWrite)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(input.IdempotencyKey) == "" {
 		return nil, huma.Error400BadRequest("Idempotency-Key is required")
+	}
+	if input.Body.Payload == nil {
+		input.Body.Payload = map[string]any{}
 	}
 	payload, err := json.Marshal(input.Body.Payload)
 	if err != nil {
 		return nil, huma.Error400BadRequest("payload is not valid JSON", err)
 	}
-	actor, permissionErr := requirePermission(ctx, "event:write")
-	if permissionErr != nil {
-		return nil, permissionErr
-	}
 	result, err := a.store.IngestEvent(ctx, actor, input.WorkflowID, input.IdempotencyKey, input.Body.Type, payload, a.maxIngestionRate)
-	if errors.Is(err, store.ErrNotFound) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		return nil, huma.Error404NotFound("workflow was not found or is inactive")
-	}
-	if errors.Is(err, store.ErrEventTypeMismatch) {
+	case errors.Is(err, store.ErrEventTypeMismatch):
 		return nil, huma.Error400BadRequest("event type does not match the workflow trigger")
-	}
-	if errors.Is(err, store.ErrRateLimitExceeded) {
+	case errors.Is(err, store.ErrRateLimitExceeded):
 		return nil, huma.Error429TooManyRequests("tenant ingestion rate limit exceeded")
-	}
-	if err != nil {
-		a.logger.Error("event ingestion failed", "error", err)
-		return nil, huma.Error500InternalServerError("event could not be accepted")
+	case err != nil:
+		return nil, a.internalError("event could not be accepted", err)
 	}
 	if result.Duplicate {
 		a.metrics.EventsDuplicate.Inc()
@@ -268,6 +356,34 @@ func (a *API) ingestEvent(ctx context.Context, input *ingestEventInput) (*ingest
 		a.metrics.EventsAccepted.Inc()
 	}
 	return &ingestEventOutput{Status: http.StatusAccepted, Body: result}, nil
+}
+
+type listExecutionsInput struct {
+	Status     string `query:"status" enum:"awaiting_approval,queued,running,succeeded,failed,cancelled" required:"false"`
+	WorkflowID string `query:"workflowId" format:"uuid" required:"false"`
+	Limit      int    `query:"limit" minimum:"1" maximum:"100" default:"50"`
+	Cursor     string `query:"cursor" maxLength:"256" doc:"Opaque cursor from a previous page's nextCursor."`
+}
+
+type executionsOutput struct {
+	Body store.ExecutionPage
+}
+
+func (a *API) listExecutions(ctx context.Context, input *listExecutionsInput) (*executionsOutput, error) {
+	actor, err := requirePermission(ctx, PermExecutionRead)
+	if err != nil {
+		return nil, err
+	}
+	page, err := a.store.ListExecutions(ctx, actor.TenantID,
+		store.ExecutionFilter{Status: input.Status, WorkflowID: input.WorkflowID},
+		store.Page{Limit: input.Limit, Cursor: input.Cursor})
+	if errors.Is(err, store.ErrInvalidInput) {
+		return nil, huma.Error400BadRequest("cursor is invalid")
+	}
+	if err != nil {
+		return nil, a.internalError("could not list executions", err)
+	}
+	return &executionsOutput{Body: page}, nil
 }
 
 type executionInput struct {
@@ -279,7 +395,7 @@ type executionOutput struct {
 }
 
 func (a *API) getExecution(ctx context.Context, input *executionInput) (*executionOutput, error) {
-	actor, err := requirePermission(ctx, "execution:read")
+	actor, err := requirePermission(ctx, PermExecutionRead)
 	if err != nil {
 		return nil, err
 	}
@@ -288,8 +404,7 @@ func (a *API) getExecution(ctx context.Context, input *executionInput) (*executi
 		return nil, huma.Error404NotFound("execution was not found")
 	}
 	if err != nil {
-		a.logger.Error("load execution failed", "error", err)
-		return nil, huma.Error500InternalServerError("could not load execution")
+		return nil, a.internalError("could not load execution", err)
 	}
 	return &executionOutput{Body: result}, nil
 }
@@ -299,100 +414,15 @@ type analyticsOutput struct {
 }
 
 func (a *API) analytics(ctx context.Context, _ *struct{}) (*analyticsOutput, error) {
-	actor, err := requirePermission(ctx, "analytics:read")
+	actor, err := requirePermission(ctx, PermAnalyticsRead)
 	if err != nil {
 		return nil, err
 	}
 	result, err := a.store.Analytics(ctx, actor.TenantID)
 	if err != nil {
-		a.logger.Error("load analytics failed", "error", err)
-		return nil, huma.Error500InternalServerError("could not load analytics")
+		return nil, a.internalError("could not load analytics", err)
 	}
 	return &analyticsOutput{Body: result}, nil
-}
-
-func authenticate(repository *store.Store, logger *slog.Logger, oidcValidator *OIDCValidator, oidcIssuer, tenantID string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-			if !strings.HasPrefix(request.URL.Path, "/v1/") {
-				next.ServeHTTP(response, request)
-				return
-			}
-			token, validAuthorization := bearerToken(request.Header.Get("Authorization"))
-			if !validAuthorization {
-				response.Header().Set("Content-Type", "application/problem+json")
-				response.WriteHeader(http.StatusUnauthorized)
-				_, _ = response.Write([]byte(`{"title":"Unauthorized","status":401,"detail":"a valid bearer token is required"}`))
-				return
-			}
-			var principal store.Principal
-			var capability store.TenantCapability
-			var err error
-
-			if strings.HasPrefix(token, "ey") && oidcValidator != nil {
-				jwtToken, jwtErr := oidcValidator.ValidateToken(token)
-				if jwtErr != nil {
-					logger.Error("OIDC token validation failed", "error", jwtErr)
-					response.Header().Set("Content-Type", "application/problem+json")
-					response.WriteHeader(http.StatusUnauthorized)
-					_, _ = response.Write([]byte(`{"title":"Unauthorized","status":401,"detail":"a valid bearer token is required"}`))
-					return
-				}
-				sub, _ := jwtToken.Claims.GetSubject()
-				principal, capability, err = repository.AuthenticateOIDC(request.Context(), store.FederatedIdentity{Issuer: oidcIssuer, Subject: sub, DisplayName: sub, TenantID: tenantID, ExpiresAt: time.Now().Add(time.Hour)})
-			} else {
-				principal, capability, err = repository.AuthenticateAPIKey(request.Context(), token)
-			}
-
-			if err != nil {
-				if err != nil && !errors.Is(err, store.ErrForbidden) {
-					logger.Error("authentication failed", "error", err)
-				}
-				response.Header().Set("Content-Type", "application/problem+json")
-				response.WriteHeader(http.StatusUnauthorized)
-				_, _ = response.Write([]byte(`{"title":"Unauthorized","status":401,"detail":"a valid bearer token is required"}`))
-				return
-			}
-			ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
-			ctx = store.WithTenantCapability(ctx, capability)
-			next.ServeHTTP(response, request.WithContext(ctx))
-		})
-	}
-}
-
-func bearerToken(value string) (string, bool) {
-	parts := strings.Fields(value)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-		return "", false
-	}
-	return parts[1], true
-}
-
-func principalFrom(ctx context.Context) store.Principal {
-	principal, _ := ctx.Value(principalContextKey{}).(store.Principal)
-	return principal
-}
-
-func tenantFrom(ctx context.Context) string { return principalFrom(ctx).TenantID }
-
-func requirePermission(ctx context.Context, permission string) (store.Principal, error) {
-	principal := principalFrom(ctx)
-	if principal.ID == "" || !roleAllows(principal.Role, permission) {
-		return store.Principal{}, huma.Error403Forbidden("the authenticated principal lacks the required permission")
-	}
-	return principal, nil
-}
-
-func roleAllows(role, permission string) bool {
-	if role == "owner" {
-		return true
-	}
-	allowed := map[string]map[string]bool{
-		"operator": {"workflow:read": true, "workflow:write": true, "event:write": true, "execution:read": true, "analytics:read": true, "pipeline:read": true, "pipeline:write": true, "incident:read": true, "incident:ack": true, "incident:classify": true, "approval:read": true},
-		"approver": {"workflow:read": true, "execution:read": true, "incident:read": true, "approval:read": true, "approval:decide": true, "analytics:read": true},
-		"viewer":   {"workflow:read": true, "execution:read": true, "analytics:read": true, "pipeline:read": true, "incident:read": true, "approval:read": true},
-	}
-	return allowed[role][permission]
 }
 
 func maxBodyBytes(limit int64) func(http.Handler) http.Handler {
@@ -408,8 +438,9 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 			started := time.Now()
-			next.ServeHTTP(response, request)
-			logger.Info("HTTP request", "method", request.Method, "path", request.URL.Path,
+			recorder := middleware.NewWrapResponseWriter(response, request.ProtoMajor)
+			next.ServeHTTP(recorder, request)
+			logger.Info("HTTP request", "method", request.Method, "path", request.URL.Path, "status", recorder.Status(),
 				"request_id", middleware.GetReqID(request.Context()), "duration_ms", time.Since(started).Milliseconds())
 		})
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,9 +19,19 @@ import (
 	"github.com/david/nimbus/internal/platform/database"
 	"github.com/david/nimbus/internal/platform/observability"
 	"github.com/david/nimbus/internal/store"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "openapi" {
+		spec, err := httpapi.OpenAPISpec()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(string(spec))
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(logger); err != nil {
 		logger.Error("Nimbus stopped", "error", err)
@@ -43,19 +54,7 @@ func run(logger *slog.Logger) error {
 	defer pool.Close()
 	repository := store.New(pool)
 	if cfg.Component == "migrate" {
-		migrationCtx, cancel := context.WithTimeout(rootCtx, cfg.MigrationTimeout)
-		defer cancel()
-		if err := database.Migrate(migrationCtx, pool); err != nil {
-			return err
-		}
-		if err := repository.BootstrapTenant(migrationCtx, cfg.TenantID, cfg.TenantName); err != nil {
-			return err
-		}
-		if err := repository.BootstrapOwner(migrationCtx, cfg.TenantID, "Nimbus Local Owner", cfg.APIKey); err != nil {
-			return err
-		}
-		logger.Info("Nimbus migrations and bootstrap completed")
-		return nil
+		return migrate(rootCtx, logger, cfg, repository, pool)
 	}
 	if err := database.VerifySchema(rootCtx, pool); err != nil {
 		return err
@@ -75,32 +74,70 @@ func run(logger *slog.Logger) error {
 
 	runsWorkers := cfg.Component == "all" || cfg.Component == "worker"
 	metrics := observability.NewMetrics(runsWorkers)
-	var workers sync.WaitGroup
+	var background sync.WaitGroup
 	if runsWorkers {
-		connectors := execution.DefaultConnectors(cfg.OutboundAllowedHosts, execution.NewSigner(cfg.WebhookSecret))
-		worker := execution.NewWorker(repository, logger, metrics, connectors, execution.WorkerConfig{
-			Count: cfg.WorkerCount, PollInterval: cfg.PollInterval,
-			LeaseDuration: cfg.LeaseDuration, MaxConcurrentSteps: cfg.MaxConcurrentSteps,
-		})
-		publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
-		operationalMetrics := observability.NewOperationalRefresher(repository, metrics, logger, cfg.OperationalMetricsInterval)
-		workers.Add(3)
-		go func() { defer workers.Done(); worker.Run(rootCtx) }()
-		go func() { defer workers.Done(); publisher.Run(rootCtx) }()
-		go func() { defer workers.Done(); operationalMetrics.Run(rootCtx) }()
+		startWorkers(rootCtx, &background, logger, cfg, repository, metrics)
 	}
 	handler := httpapi.NewOperational(repository, metrics, logger)
 	if cfg.Component == "all" || cfg.Component == "api" {
-		var oidcValidator *httpapi.OIDCValidator
-		if cfg.OIDCIssuer != "" {
-			oidcValidator, err = httpapi.NewOIDCValidator(cfg.OIDCIssuer, cfg.OIDCAudience)
-			if err != nil {
-				return err
-			}
+		handler, err = apiHandler(rootCtx, logger, cfg, repository, metrics)
+		if err != nil {
+			return err
 		}
-		handler = httpapi.New(repository, metrics, logger, awsmonitor.NewCollector(cfg.AWSExternalIDs), oidcValidator, cfg.OIDCIssuer, cfg.TenantID, cfg.MaxIngestionRate)
 	}
+	return serve(rootCtx, logger, cfg, handler, &background)
+}
 
+func migrate(ctx context.Context, logger *slog.Logger, cfg config.Config, repository *store.Store, pool *pgxpool.Pool) error {
+	migrationCtx, cancel := context.WithTimeout(ctx, cfg.MigrationTimeout)
+	defer cancel()
+	if err := database.Migrate(migrationCtx, pool); err != nil {
+		return err
+	}
+	if err := repository.BootstrapTenant(migrationCtx, cfg.TenantID, cfg.TenantName); err != nil {
+		return err
+	}
+	if err := repository.BootstrapOwner(migrationCtx, cfg.TenantID, "Nimbus Local Owner", cfg.APIKey); err != nil {
+		return err
+	}
+	logger.Info("Nimbus migrations and bootstrap completed")
+	return nil
+}
+
+func startWorkers(ctx context.Context, group *sync.WaitGroup, logger *slog.Logger, cfg config.Config, repository *store.Store, metrics *observability.Metrics) {
+	connectors := execution.DefaultConnectors(cfg.OutboundAllowedHosts, execution.NewSigner(cfg.WebhookSecrets...))
+	worker := execution.NewWorker(repository, logger, metrics, connectors, execution.WorkerConfig{
+		Count: cfg.WorkerCount, PollInterval: cfg.PollInterval,
+		LeaseDuration: cfg.LeaseDuration, MaxConcurrentSteps: cfg.MaxConcurrentSteps,
+	})
+	publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
+	operational := observability.NewOperationalRefresher(repository, metrics, logger, cfg.OperationalMetricsInterval)
+	maintenance := execution.NewMaintenance(repository, logger, 5*time.Minute)
+	for _, runner := range []func(context.Context){worker.Run, publisher.Run, operational.Run, maintenance.Run} {
+		group.Go(func() { runner(ctx) })
+	}
+}
+
+func apiHandler(ctx context.Context, logger *slog.Logger, cfg config.Config, repository *store.Store, metrics *observability.Metrics) (http.Handler, error) {
+	var verifier *httpapi.OIDCVerifier
+	if cfg.OIDC.Enabled() {
+		var err error
+		verifier, err = httpapi.NewOIDCVerifier(ctx, httpapi.OIDCConfig{
+			Issuer: cfg.OIDC.Issuer, Audience: cfg.OIDC.Audience, Algorithms: cfg.OIDC.Algorithms,
+			TenantClaim: cfg.OIDC.TenantClaim, DefaultTenant: cfg.TenantID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return httpapi.New(httpapi.Options{
+		Store: repository, Metrics: metrics, Logger: logger,
+		AWSCollector: awsmonitor.NewCollector(cfg.AWSExternalIDs), OIDC: verifier,
+		MaxIngestionRate: cfg.MaxIngestionRate, WebDir: cfg.WebDir,
+	}), nil
+}
+
+func serve(ctx context.Context, logger *slog.Logger, cfg config.Config, handler http.Handler, background *sync.WaitGroup) error {
 	server := &http.Server{
 		Addr:              cfg.HTTPAddress,
 		Handler:           handler,
@@ -117,18 +154,18 @@ func run(logger *slog.Logger) error {
 	}()
 
 	select {
-	case <-rootCtx.Done():
+	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			return err
+			return fmt.Errorf("shutdown HTTP server: %w", err)
 		}
-		workers.Wait()
+		background.Wait()
 		return nil
 	case err := <-serverErrors:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("serve HTTP: %w", err)
 	}
 }

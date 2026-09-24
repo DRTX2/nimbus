@@ -1,14 +1,16 @@
 package httpapi
 
 import (
+	"crypto/sha256"
 	"testing"
 	"time"
 )
 
 func TestRoleAllows(t *testing.T) {
 	tests := []struct {
-		role, permission string
-		want             bool
+		role       string
+		permission Permission
+		want       bool
 	}{
 		{role: "owner", permission: "identity:write", want: true},
 		{role: "operator", permission: "pipeline:write", want: true},
@@ -58,5 +60,27 @@ func TestBearerToken(t *testing.T) {
 				t.Fatalf("bearerToken(%q) = (%q, %v), want (%q, %v)", test.value, got, ok, test.want, test.ok)
 			}
 		})
+	}
+}
+
+func TestSessionCacheIsBoundedAndExpires(t *testing.T) {
+	cache := newSessionCache(3)
+	now := time.Now()
+	for i := range 10 {
+		cache.put(sha256.Sum256([]byte{byte(i)}), sessionEntry{expiresAt: now.Add(time.Minute)})
+	}
+	if cache.len() > 3 {
+		t.Fatalf("cache grew to %d entries, limit 3", cache.len())
+	}
+	key := sha256.Sum256([]byte("expired"))
+	cache.put(key, sessionEntry{expiresAt: now.Add(-time.Second)})
+	if _, ok := cache.get(key, now); ok {
+		t.Fatal("expired session was served from cache")
+	}
+}
+
+func TestLooksLikeJWT(t *testing.T) {
+	if !looksLikeJWT("eyJhbGciOi.eyJzdWIi.c2ln") || looksLikeJWT("nmb_abcdef") || looksLikeJWT("eyJonlyone.part") {
+		t.Fatal("JWT shape detection is wrong")
 	}
 }

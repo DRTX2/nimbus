@@ -42,3 +42,25 @@ func TestLoadRequiresBootstrapKeyOnlyForMigrator(t *testing.T) {
 		t.Fatal("Load() accepted a production migrator without a bootstrap owner key")
 	}
 }
+
+// Misconfiguration must stop the process rather than run with surprising defaults.
+func TestLoadRejectsMalformedValues(t *testing.T) {
+	for name, value := range map[string]string{
+		"NIMBUS_WORKER_COUNT":         "many",
+		"NIMBUS_POLL_INTERVAL":        "-1s",
+		"NIMBUS_OIDC_ALGORITHMS":      "none",
+		"NIMBUS_WEBHOOK_SECRET":       "short",
+		"NIMBUS_WEB_DIR":              "/definitely/not/here",
+		"NIMBUS_MAX_CONCURRENT_STEPS": "0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("NIMBUS_COMPONENT", "api")
+			t.Setenv("NIMBUS_OIDC_ISSUER", "http://localhost:9999")
+			t.Setenv("NIMBUS_OIDC_AUDIENCE", "nimbus")
+			t.Setenv(name, value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted %s=%q", name, value)
+			}
+		})
+	}
+}

@@ -18,11 +18,14 @@ func (a *API) registerIncidents(api huma.API) {
 	create.DefaultStatus = http.StatusCreated
 	huma.Register(api, create, a.createPipeline)
 	huma.Register(api, securedOperation("listPipelines", http.MethodGet, "/v1/pipelines", "Reliability"), a.listPipelines)
+	huma.Register(api, securedOperation("getPipeline", http.MethodGet, "/v1/pipelines/{pipelineId}", "Reliability"), a.getPipeline)
 	huma.Register(api, securedOperation("checkPipeline", http.MethodPost, "/v1/pipelines/{pipelineId}/checks", "Reliability"), a.checkPipeline)
 	observe := securedOperation("recordObservation", http.MethodPost, "/v1/pipelines/{pipelineId}/observations", "Reliability")
 	observe.DefaultStatus = http.StatusAccepted
 	huma.Register(api, observe, a.recordObservation)
 	huma.Register(api, securedOperation("listIncidents", http.MethodGet, "/v1/incidents", "Incidents"), a.listIncidents)
+	huma.Register(api, securedOperation("getIncident", http.MethodGet, "/v1/incidents/{incidentId}", "Incidents"), a.getIncident)
+	huma.Register(api, securedOperation("resolveIncident", http.MethodPost, "/v1/incidents/{incidentId}/resolutions", "Incidents"), a.resolveIncident)
 	huma.Register(api, securedOperation("acknowledgeIncident", http.MethodPost, "/v1/incidents/{incidentId}/acknowledgements", "Incidents"), a.acknowledgeIncident)
 	huma.Register(api, securedOperation("reviewIncident", http.MethodPost, "/v1/incidents/{incidentId}/reviews", "Incidents"), a.reviewIncident)
 	huma.Register(api, securedOperation("weeklyIncidentQuality", http.MethodGet, "/v1/reports/incident-quality/weekly", "Reports"), a.weeklyIncidentQuality)
@@ -47,14 +50,17 @@ type createPipelineInput struct {
 type pipelineOutput struct{ Body store.Pipeline }
 
 func (a *API) createPipeline(ctx context.Context, input *createPipelineInput) (*pipelineOutput, error) {
-	actor, err := requirePermission(ctx, "pipeline:write")
+	actor, err := requirePermission(ctx, PermPipelineWrite)
 	if err != nil {
 		return nil, err
 	}
 	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDRef: input.Body.ExternalIDRef, IncidentWorkflowID: input.Body.IncidentWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds}
 	result, err := a.store.CreatePipeline(ctx, actor, pipeline)
+	if errors.Is(err, store.ErrInvalidInput) {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
 	if err != nil {
-		return nil, huma.Error400BadRequest("pipeline could not be created", err)
+		return nil, a.internalError("pipeline could not be created", err)
 	}
 	return &pipelineOutput{Body: result}, nil
 }
@@ -66,13 +72,13 @@ type pipelinesOutput struct {
 }
 
 func (a *API) listPipelines(ctx context.Context, _ *struct{}) (*pipelinesOutput, error) {
-	actor, err := requirePermission(ctx, "pipeline:read")
+	actor, err := requirePermission(ctx, PermPipelineRead)
 	if err != nil {
 		return nil, err
 	}
 	items, err := a.store.ListPipelines(ctx, actor.TenantID)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not list pipelines")
+		return nil, a.internalError("could not list pipelines", err)
 	}
 	out := &pipelinesOutput{}
 	out.Body.Items = items
@@ -83,8 +89,8 @@ type checkPipelineInput struct {
 	PipelineID string `path:"pipelineId" format:"uuid"`
 }
 
-func (a *API) checkPipeline(ctx context.Context, input *checkPipelineInput) (*observationOutput, error) {
-	actor, err := requirePermission(ctx, "pipeline:write")
+func (a *API) getPipeline(ctx context.Context, input *checkPipelineInput) (*pipelineOutput, error) {
+	actor, err := requirePermission(ctx, PermPipelineRead)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +99,25 @@ func (a *API) checkPipeline(ctx context.Context, input *checkPipelineInput) (*ob
 		return nil, huma.Error404NotFound("pipeline was not found")
 	}
 	if err != nil {
-		return nil, huma.Error500InternalServerError("pipeline could not be loaded")
+		return nil, a.internalError("pipeline could not be loaded", err)
+	}
+	return &pipelineOutput{Body: pipeline}, nil
+}
+
+func (a *API) checkPipeline(ctx context.Context, input *checkPipelineInput) (*observationOutput, error) {
+	actor, err := requirePermission(ctx, PermPipelineWrite)
+	if err != nil {
+		return nil, err
+	}
+	pipeline, err := a.store.GetPipeline(ctx, actor.TenantID, input.PipelineID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, huma.Error404NotFound("pipeline was not found")
+	}
+	if err != nil {
+		return nil, a.internalError("pipeline could not be loaded", err)
+	}
+	if pipeline.Mode != "aws" {
+		return nil, huma.Error409Conflict("only AWS pipelines can be checked against CloudWatch")
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -104,7 +128,7 @@ func (a *API) checkPipeline(ctx context.Context, input *checkPipelineInput) (*ob
 	}
 	incidents, err := a.store.RecordObservation(ctx, actor, observation)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("observation could not be evaluated")
+		return nil, a.internalError("observation could not be evaluated", err)
 	}
 	out := &observationOutput{}
 	out.Body.Incidents = incidents
@@ -132,7 +156,7 @@ type observationOutput struct {
 }
 
 func (a *API) recordObservation(ctx context.Context, input *observationInput) (*observationOutput, error) {
-	actor, err := requirePermission(ctx, "pipeline:write")
+	actor, err := requirePermission(ctx, PermPipelineWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +172,7 @@ func (a *API) recordObservation(ctx context.Context, input *observationInput) (*
 		return nil, huma.Error403Forbidden("fixture observations are disabled for AWS pipelines")
 	}
 	if err != nil {
-		return nil, huma.Error500InternalServerError("observation could not be evaluated")
+		return nil, a.internalError("observation could not be evaluated", err)
 	}
 	out := &observationOutput{}
 	out.Body.Incidents = incidents
@@ -178,14 +202,18 @@ type incidentsOutput struct {
 	}
 }
 
-func (a *API) listIncidents(ctx context.Context, _ *struct{}) (*incidentsOutput, error) {
-	actor, err := requirePermission(ctx, "incident:read")
+type listIncidentsInput struct {
+	Status string `query:"status" enum:"active,open,acknowledged,recovered,resolved" required:"false" doc:"Filter by lifecycle status; active means open or acknowledged."`
+}
+
+func (a *API) listIncidents(ctx context.Context, input *listIncidentsInput) (*incidentsOutput, error) {
+	actor, err := requirePermission(ctx, PermIncidentRead)
 	if err != nil {
 		return nil, err
 	}
-	items, err := a.store.ListIncidents(ctx, actor.TenantID, store.IncidentFilter{})
+	items, err := a.store.ListIncidents(ctx, actor.TenantID, store.IncidentFilter{Status: input.Status})
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not list incidents")
+		return nil, a.internalError("could not list incidents", err)
 	}
 	out := &incidentsOutput{}
 	out.Body.Items = items
@@ -195,25 +223,58 @@ func (a *API) listIncidents(ctx context.Context, _ *struct{}) (*incidentsOutput,
 type acknowledgeInput struct {
 	IncidentID string `path:"incidentId" format:"uuid"`
 }
-type acknowledgeOutput struct {
-	Body struct {
-		Status string `json:"status"`
+
+type incidentOutput struct{ Body store.Incident }
+
+func (a *API) getIncident(ctx context.Context, input *acknowledgeInput) (*incidentOutput, error) {
+	actor, err := requirePermission(ctx, PermIncidentRead)
+	if err != nil {
+		return nil, err
+	}
+	incident, err := a.store.GetIncident(ctx, actor.TenantID, input.IncidentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, huma.Error404NotFound("incident was not found")
+	}
+	if err != nil {
+		return nil, a.internalError("incident could not be loaded", err)
+	}
+	return &incidentOutput{Body: incident}, nil
+}
+
+type resolveIncidentInput struct {
+	IncidentID string `path:"incidentId" format:"uuid"`
+	Body       struct {
+		Note string `json:"note,omitempty" maxLength:"500"`
 	}
 }
 
-func (a *API) acknowledgeIncident(ctx context.Context, input *acknowledgeInput) (*acknowledgeOutput, error) {
-	actor, err := requirePermission(ctx, "incident:ack")
+func (a *API) resolveIncident(ctx context.Context, input *resolveIncidentInput) (*statusOutput, error) {
+	actor, err := requirePermission(ctx, PermIncidentResolve)
+	if err != nil {
+		return nil, err
+	}
+	err = a.store.ResolveIncident(ctx, actor, input.IncidentID, input.Body.Note)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, huma.Error404NotFound("incident was not found")
+	case errors.Is(err, store.ErrInvalidInput):
+		return nil, huma.Error400BadRequest(err.Error())
+	case err != nil:
+		return nil, a.internalError("incident could not be resolved", err)
+	}
+	return newStatusOutput("resolved"), nil
+}
+func (a *API) acknowledgeIncident(ctx context.Context, input *acknowledgeInput) (*statusOutput, error) {
+	actor, err := requirePermission(ctx, PermIncidentAck)
 	if err != nil {
 		return nil, err
 	}
 	if err := a.store.AcknowledgeIncident(ctx, actor, input.IncidentID); errors.Is(err, store.ErrNotFound) {
 		return nil, huma.Error404NotFound("open incident was not found")
 	} else if err != nil {
-		return nil, huma.Error500InternalServerError("incident could not be acknowledged")
+		return nil, a.internalError("incident could not be acknowledged", err)
 	}
-	out := &acknowledgeOutput{}
-	out.Body.Status = "acknowledged"
-	return out, nil
+	return newStatusOutput("acknowledged"), nil
 }
 
 type reviewIncidentInput struct {
@@ -229,7 +290,7 @@ type reviewIncidentOutput struct {
 }
 
 func (a *API) reviewIncident(ctx context.Context, input *reviewIncidentInput) (*reviewIncidentOutput, error) {
-	actor, err := requirePermission(ctx, "incident:classify")
+	actor, err := requirePermission(ctx, PermIncidentClassify)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +302,7 @@ func (a *API) reviewIncident(ctx context.Context, input *reviewIncidentInput) (*
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 	if err != nil {
-		return nil, huma.Error500InternalServerError("incident review could not be recorded")
+		return nil, a.internalError("incident review could not be recorded", err)
 	}
 	return &reviewIncidentOutput{Body: review}, nil
 }
@@ -266,14 +327,14 @@ func weekBoundsUTC(now time.Time, weeksAgo int) (time.Time, time.Time) {
 }
 
 func (a *API) weeklyIncidentQuality(ctx context.Context, input *weeklyIncidentQualityInput) (*weeklyIncidentQualityOutput, error) {
-	actor, err := requirePermission(ctx, "incident:read")
+	actor, err := requirePermission(ctx, PermIncidentRead)
 	if err != nil {
 		return nil, err
 	}
 	weekStart, weekEnd := weekBoundsUTC(time.Now(), input.WeeksAgo)
 	items, err := a.store.WeeklyIncidentQuality(ctx, actor.TenantID, weekStart, weekEnd)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("weekly incident quality report could not be loaded")
+		return nil, a.internalError("weekly incident quality report could not be loaded", err)
 	}
 	out := &weeklyIncidentQualityOutput{}
 	out.Body.WeekStart = weekStart
