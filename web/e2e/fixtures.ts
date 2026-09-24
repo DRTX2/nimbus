@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { expect, type APIRequestContext } from "@playwright/test";
+import { expect, type APIRequestContext, type Page } from "@playwright/test";
 import { createBdd, test as base } from "playwright-bdd";
 
 const ownerKey = process.env.NIMBUS_E2E_API_KEY ?? "nimbus-local-development-key";
@@ -88,9 +88,21 @@ export class NimbusApi {
   }
 }
 
-export const test = base.extend<{ nimbus: NimbusApi }>({
+export const test = base.extend<{ nimbus: NimbusApi; page: Page }>({
   nimbus: async ({ request }, use) => {
     await use(new NimbusApi(request));
+  },
+  // Any uncaught exception or console error (including CSP violations) fails
+  // the journey, so regressions that do not break a click still surface.
+  page: async ({ page }, use) => {
+    const problems: string[] = [];
+    page.on("pageerror", (error) => problems.push(`uncaught: ${error.message}`));
+    page.on("console", (message) => {
+      // Rejected credentials are an expected 401 in sign-in journeys.
+      if (message.type() === "error" && !message.text().includes("401")) problems.push(message.text());
+    });
+    await use(page);
+    expect(problems, "browser errors during the journey").toEqual([]);
   },
 });
 

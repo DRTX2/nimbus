@@ -49,19 +49,19 @@ export const useIncidents = (status?: IncidentStatusFilter) =>
   });
 
 export const useIncident = (id: string) =>
-  useQuery({ queryKey: keys.incident(id), queryFn: () => unwrap(api.GET("/v1/incidents/{incidentId}", { params: { path: { incidentId: id } } })), ...live });
+  useQuery({ queryKey: keys.incident(id), queryFn: () => unwrap(api.GET("/v1/incidents/{incidentId}", { params: { path: { incidentId: id } } })), enabled: id !== "", ...live });
 
 export const usePipelines = () =>
   useQuery({ queryKey: keys.pipelines, queryFn: async () => (await unwrap(api.GET("/v1/pipelines"))).items ?? [] });
 
 export const usePipeline = (id: string) =>
-  useQuery({ queryKey: keys.pipeline(id), queryFn: () => unwrap(api.GET("/v1/pipelines/{pipelineId}", { params: { path: { pipelineId: id } } })) });
+  useQuery({ queryKey: keys.pipeline(id), queryFn: () => unwrap(api.GET("/v1/pipelines/{pipelineId}", { params: { path: { pipelineId: id } } })), enabled: id !== "" });
 
 export const useWorkflows = () =>
   useQuery({ queryKey: keys.workflows, queryFn: async () => (await unwrap(api.GET("/v1/workflows"))).items ?? [] });
 
 export const useWorkflow = (id: string) =>
-  useQuery({ queryKey: keys.workflow(id), queryFn: () => unwrap(api.GET("/v1/workflows/{workflowId}", { params: { path: { workflowId: id } } })) });
+  useQuery({ queryKey: keys.workflow(id), queryFn: () => unwrap(api.GET("/v1/workflows/{workflowId}", { params: { path: { workflowId: id } } })), enabled: id !== "" });
 
 export function useExecutions(filter: { status?: ExecutionStatus; workflowId?: string }) {
   return useInfiniteQuery({
@@ -78,6 +78,7 @@ export const useExecution = (id: string) =>
   useQuery({
     queryKey: keys.execution(id),
     queryFn: () => unwrap(api.GET("/v1/executions/{executionId}", { params: { path: { executionId: id } } })),
+    enabled: id !== "",
     // Poll only while work is still in flight.
     refetchInterval: (query) => (["queued", "running", "awaiting_approval"].includes(query.state.data?.status ?? "queued") ? 2_000 : false),
   });
