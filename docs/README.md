@@ -12,6 +12,7 @@ lector pueda encontrar informacion sin recorrer todo el repositorio.
 | [`VALIDATION_REPORT.es.md`](VALIDATION_REPORT.es.md) | Evidencia de verificaciones ejecutadas y smoke tests realizados |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Decisiones, garantias y evolucion de arquitectura |
 | [`REQUIREMENTS.md`](REQUIREMENTS.md) | Requerimientos y criterios de aceptacion |
+| [`TESTING.md`](TESTING.md) | Estrategia de pruebas en trofeo, suites Gherkin y como ejecutarlas |
 | [`PRODUCT.md`](PRODUCT.md) | Problema, cliente objetivo, diferenciacion y modelo comercial |
 | [`PHASES_4_6.md`](PHASES_4_6.md) | Demo de producto, gobernanza y separacion API/worker |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Despliegue local, Kubernetes y sandbox AWS |
@@ -22,6 +23,9 @@ lector pueda encontrar informacion sin recorrer todo el repositorio.
 
 - Contrato HTTP ejecutable: <http://localhost:8080/openapi.json>.
 - Documentacion interactiva: <http://localhost:8080/docs>.
+- Dashboard: <http://localhost:8080/app/>.
+- Contrato versionado: `api/openapi.json` (generado con `make openapi`).
+- Especificaciones ejecutables: `test/features/`, `web/src/features/**/*.feature`, `web/e2e/features/`.
 - Migraciones: `internal/platform/database/migrations/`.
 - Comandos canonicos: `Makefile` y `AGENTS.md`.
 - Estado de seguridad: `SECURITY.md`.

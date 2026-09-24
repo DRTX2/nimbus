@@ -1,6 +1,6 @@
 # Estado Actual Del Proyecto
 
-Fecha del estado: **2026-07-29**.
+Fecha del estado: **2026-09-24**.
 
 ## Resumen Ejecutivo
 
@@ -22,6 +22,7 @@ opt-in y read-only. No se ha creado infraestructura cloud real.
 | 4. Producto | Beta funcional | Pipelines fixture/AWS, siete metricas, cuatro detectores, incidentes, workflow webhook |
 | 5. Gobernanza | Beta funcional | API keys, RBAC, approvals, audit events, versiones, RLS schema, external-ID reference |
 | 6. Escalado evolutivo | Beta funcional | Outbox, retry/fencing, componentes `all|api|worker`, Compose y Kubernetes split |
+| 6b. Seguridad hosted y UI | Beta funcional | OIDC con sesiones bajo RLS, administracion de miembros, webhooks firmados con rotacion, cuotas, dashboard web, suites Gherkin |
 | 7. Data/AI | Pendiente condicionado | Export gobernado, backtesting, baselines robustos, resumen AI opcional |
 
 ## Funcionalidad Disponible
@@ -120,12 +121,14 @@ revocado.
 - No hay descubrimiento automatico de topologias AWS.
 - RLS se fuerza con roles locales no propietarios para API y worker y contexto
   tenant transaccional. Produccion debe provisionar esos roles antes de migrar.
-- No hay OIDC/JWKS, SCIM ni lifecycle empresarial de memberships.
+- OIDC/JWKS implementado (discovery, allowlist de algoritmos, claim de tenant,
+  sesiones efimeras bajo RLS); no hay SCIM ni sincronizacion automatica de grupos.
 - No hay proveedor general de secretos ni firma HMAC de webhooks.
 - Analytics actual es operacional de 24 horas, no un BI historico.
 - El reporte de calidad cubre como maximo 52 semanas hacia atras y no sustituye
   entrevistas, resultados operativos de clientes ni validacion comercial.
-- No hay UI de producto; Scalar es la interfaz de demostracion.
+- El dashboard `/app/` cubre respuesta a incidentes, workflows, ejecuciones,
+  approvals, acceso y calidad; Scalar sigue disponible para el contrato.
 - No hay despliegue AWS real, dominio, TLS publico ni SLA demostrado.
 - No se han realizado entrevistas con clientes ni existen design partners
   reales; esas cifras siguen siendo objetivos de validacion.
@@ -135,9 +138,9 @@ revocado.
 ### Prioridad 1: Hosted Security
 
 - OIDC/JWKS con issuer, audience, algoritmos y cache acotados. (COMPLETADO)
+- Webhooks firmados con rotacion de secreto. (COMPLETADO; la ventana antireplay la aplica el receptor)
+- Cuotas de ingestion y concurrencia por tenant. (COMPLETADO; falta presupuesto de llamadas AWS)
 - Secret references en AWS SSM/Secrets Manager.
-- Webhooks firmados, rotacion y ventana antireplay.
-- Cuotas de ingestion, concurrencia y llamadas AWS por tenant.
 
 ### Prioridad 2: Validacion Comercial
 
@@ -146,8 +149,8 @@ revocado.
   y acordar umbrales de aceptacion con participantes.
 - Scheduler CloudWatch con presupuesto de llamadas y jitter.
 - Descubrimiento read-only de event source mappings.
-- Notificaciones Slack/Teams sobre el mismo contrato de delivery.
-- Dashboard minimo de incidentes y approvals.
+- Notificaciones Slack o webhook generico como nuevos `Connector`.
+- Dashboard de incidentes y approvals. (COMPLETADO)
 
 ### Prioridad 3: Produccion Y SRE
 
@@ -155,7 +158,7 @@ revocado.
 - Migraciones como job separado con estrategia expand/contract.
 - Validar con carga los umbrales iniciales de backlog/outbox y convertirlos en
   SLOs con error budgets basados en evidencia.
-- Pruebas PostgreSQL concurrentes, E2E y carga sostenida.
+- Pruebas E2E y de aceptacion Gherkin (COMPLETADO, ver `docs/TESTING.md`); falta carga sostenida.
 - SBOM, provenance de release y publicacion por SHA.
 - Runbooks de incidentes, rollback y disaster recovery.
 

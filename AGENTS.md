@@ -41,3 +41,6 @@ their source and reproducible generation command.
 | Connector | unit tests, timeout and error classification tests |
 | Dependency/CI/image | supply-chain review and vulnerability scan |
 | Privileged action | authorization and negative safety tests |
+| API contract | `make openapi`, reviewed snapshot diff, dashboard typecheck |
+| Dashboard | `make web-verify`, Gherkin UI scenario, E2E journey when a flow changes |
+| Behavior change | Gherkin scenario first (`test/features` or `web/**/features`); unit tests only for boundaries |

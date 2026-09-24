@@ -93,7 +93,41 @@ grants them without requiring `CREATEROLE`, creating passwords, or granting
 `BYPASSRLS`. Compose does this only for a fresh local PostgreSQL volume with
 documented local-only credentials. The split profile uses those roles; the
 convenience monolith still uses the local owner and is not a hosted isolation
-boundary. OIDC membership remains future work.
+boundary.
+
+### Federated identity
+
+OIDC access tokens are verified in the API process (discovery, JWKS, algorithm
+allowlist, issuer, audience, expiry, optional tenant claim). The API then calls
+`nimbus_authenticate_oidc`, a fixed search-path `SECURITY DEFINER` function
+that provisions the principal as a viewer on first sight and issues an opaque
+session whose hash lives in an owner-only table. `nimbus_api_tenant()` accepts
+either an API-key hash or a live session hash, so both credential kinds share
+one RLS boundary. Membership changes delete sessions by trigger; workers purge
+expired sessions in bounded batches.
+
+## Extension Points
+
+- **Connectors.** Step types implement `execution.Connector` and register in a
+  `Registry`. Failures are classified with `StepError`; unclassified errors are
+  permanent, so a new connector cannot accidentally multiply external effects.
+- **Contract-first clients.** `api/openapi.json` is generated from the handlers
+  and guarded by a test; the dashboard derives its types from it, so a breaking
+  API change fails type checking in `web/`.
+- **Pagination.** List endpoints use opaque keyset cursors, so ordering keys can
+  change without breaking clients.
+- **Identity providers.** OIDC configuration is data (issuer, audience,
+  algorithms, tenant claim); a second provider would add a verifier, not a new
+  authorization path.
+
+## Dashboard
+
+`web/` is a React + TypeScript single-page application built by Vite and
+served by the API at `/app/` (set `NIMBUS_WEB_DIR`; the container image does
+this). Being same-origin, it needs no CORS and runs under a strict CSP. It is
+organized by capability (`src/features/*`) over a shared typed client
+(`src/shared/api`), session (`src/shared/auth`) and UI kit (`src/shared/ui`).
+Permissions come from `GET /v1/me`; the client never re-implements RBAC.
 
 ## Evolution Gates
 

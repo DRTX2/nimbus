@@ -28,8 +28,18 @@ limitations mean this release must not host mutually untrusted tenants:
   context remains transaction-local. Runtime roles cannot alter audit events or
   read migration metadata directly. Production operators must provision those roles
   before migration; Nimbus never creates roles or embeds production passwords.
-- OIDC/JWKS and a general encrypted connector secret provider are not implemented.
-  AWS AssumeRole external IDs are resolved indirectly from an environment reference.
+- OIDC tokens are verified against the provider's discovery document with an
+  algorithm allowlist, issuer, audience and expiry checks, then exchanged for a
+  short-lived database session bound to RLS exactly like an API key. First sign-in
+  provisions a viewer; role or status changes end the sessions immediately, and
+  verified tokens are cached for at most one minute.
+- A general encrypted connector secret provider is not implemented. AWS
+  AssumeRole external IDs are resolved indirectly from an environment reference.
+- Webhook deliveries are HMAC-signed (`Nimbus-Signature: t=...,v1=...`) with
+  support for a previous secret during rotation; receivers must enforce a
+  timestamp window.
+- The dashboard is same-origin, served with a strict CSP, keeps credentials in
+  sessionStorage only, and never stores them in localStorage or cookies.
 - The AWS sandbox is single-node and exposes the app only through an SSM tunnel.
 
 Cloud deployment, privileged connectors, and destructive operations always

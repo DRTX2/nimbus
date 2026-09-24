@@ -487,3 +487,33 @@ curl --fail-with-body "$NIMBUS_URL/v1/audit-events" \
 
 No se deben registrar tokens, authorization headers, payloads completos ni
 respuestas sensibles al investigar estos errores.
+
+## Endpoints Agregados En 0.2.0
+
+El contrato completo y versionado esta en `api/openapi.json`. Resumen:
+
+| Metodo y ruta | Permiso | Uso |
+| --- | --- | --- |
+| `GET /v1/me` | autenticado | Principal actual, rol y lista de permisos efectivos |
+| `GET /v1/workflows/{workflowId}` | `workflow:read` | Workflow con definicion activa y numeros de version |
+| `GET /v1/executions?status=&workflowId=&limit=&cursor=` | `execution:read` | Ejecuciones paginadas por cursor opaco (`nextCursor`) |
+| `GET /v1/pipelines/{pipelineId}` | `pipeline:read` | Configuracion de un pipeline |
+| `GET /v1/incidents?status=active` | `incident:read` | Filtro por estado; `active` = open o acknowledged |
+| `GET /v1/incidents/{incidentId}` | `incident:read` | Incidente con ultima revision y timeline completo |
+| `POST /v1/incidents/{incidentId}/resolutions` | `incident:resolve` | Cierra el incidente (idempotente) y publica `incident.resolved` |
+| `GET /v1/members` | `identity:read` | Miembros del tenant con tipo de credencial |
+| `PATCH /v1/members/{memberId}` | `identity:write` | Cambia rol o suspende; no se permite sobre uno mismo |
+
+Paginacion de ejecuciones:
+
+```bash
+curl --fail-with-body "http://localhost:8080/v1/executions?limit=2" \
+  -H 'Authorization: Bearer nimbus-local-development-key'
+# Usar el valor nextCursor devuelto:
+curl --fail-with-body "http://localhost:8080/v1/executions?limit=2&cursor=NEXT_CURSOR" \
+  -H 'Authorization: Bearer nimbus-local-development-key'
+```
+
+Inicio de sesion OIDC: enviar el access token del proveedor como
+`Authorization: Bearer <jwt>`. El primer acceso crea una membresia `viewer`; un
+owner la promueve con `PATCH /v1/members/{memberId}`.

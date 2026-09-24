@@ -40,6 +40,11 @@ market category. See [`docs/PRODUCT.md`](docs/PRODUCT.md).
 - Issue and revoke tenant API keys with `owner`, `operator`, `approver`, or `viewer` roles.
 - Pause protected executions until a different principal approves or rejects them.
 - Deploy the same image as `all`, `api`, or `worker` without introducing a broker.
+- Sign in with API keys or OIDC (discovery, JWKS, algorithm allowlist, tenant claim)
+  under the same row-level-security boundary; owners manage member roles.
+- Operate everything from a same-origin dashboard at `/app/`: incident response
+  with the failing pipeline stage highlighted, workflows, runs, approvals, access
+  and detection-quality reporting.
 
 Execution is **at-least-once**. HTTP destinations receive a stable
 `Idempotency-Key`, but the destination must honor it to prevent duplicate side
@@ -73,8 +78,11 @@ internal/store                tenant-scoped PostgreSQL operations
 internal/execution            worker runtime and connectors
 internal/detector             explainable pipeline detection rules
 internal/awsmonitor           bounded, read-only CloudWatch adapter
-internal/httpapi              Huma/Chi API and Scalar contract
+internal/httpapi              Huma/Chi API, auth (API key + OIDC), RBAC, dashboard hosting
 internal/platform             database and observability
+api/openapi.json              generated contract snapshot (see api/README.md)
+web                           React + TypeScript dashboard (typed from the contract)
+test/features                 Gherkin acceptance specifications (godog)
 deploy                        Docker observability and Kubernetes
 infra/terraform               low-cost AWS sandbox profile
 ```
@@ -93,6 +101,7 @@ Services:
 
 | Service | URL | Credentials |
 | --- | --- | --- |
+| Dashboard | <http://localhost:8080/app/> | API bearer token below |
 | Scalar API docs | <http://localhost:8080/docs> | API bearer token below |
 | Grafana | <http://localhost:3000> | `admin` / `admin` for local use |
 | Prometheus | <http://localhost:9090> | none, local use only |
@@ -156,9 +165,17 @@ make dev-down
 ## Quality And Security
 
 ```bash
-make verify
+make verify          # static, unit, race, contract snapshot
+make web-verify      # dashboard types, lint, Gherkin UI scenarios
+make test-all        # plus PostgreSQL integration and Gherkin acceptance
+make e2e             # browser journeys against a running stack
 make security
 ```
+
+Testing follows a trophy model: most confidence comes from Gherkin acceptance,
+integration and end-to-end scenarios that run the real API, worker and
+PostgreSQL role split; unit tests are reserved for security and parsing
+boundaries. See [`docs/TESTING.md`](docs/TESTING.md).
 
 The canonical verification runs formatting, vet, unit tests, the race detector,
 a reproducible build, module checksum verification, and a tidy diff check.
@@ -181,8 +198,9 @@ Security controls implemented today:
 - GitHub Actions pinned by commit, Dependabot, CodeQL, and least-privilege cloud guidance.
 
 This is a production-oriented portfolio beta, not yet a hosted production security boundary.
-OIDC/JWKS, encrypted general-purpose secret
-references, signed webhook delivery, quotas, and restore evidence remain blockers. See
+OIDC/JWKS, signed webhooks with key rotation, and per-tenant ingestion and
+concurrency quotas are implemented. Encrypted general-purpose secret references
+and restore evidence remain blockers. See
 [`SECURITY.md`](SECURITY.md).
 
 ## Delivery Profiles
@@ -208,6 +226,7 @@ applied automatically. Read [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) first.
 | 4. Product validation | Fixture/CloudWatch detectors, incident workflow, timeline | Implemented beta |
 | 5. Governance | RBAC/API keys, approvals, RLS policies, audit, external-ID reference | Implemented beta |
 | 6. Scale when measured | Transactional outbox, bounded polling, split API/workers | Implemented beta |
+| 6b. Hosted security + UI | OIDC sessions under RLS, member admin, signed webhooks, quotas, dashboard, Gherkin suites | Implemented beta |
 | 7. Data/AI | Parquet export, backtesting, explainable anomaly detection, optional summaries | Conditional |
 
 See [`docs/LEARNING_GUIDE.es.md`](docs/LEARNING_GUIDE.es.md) for a guided code

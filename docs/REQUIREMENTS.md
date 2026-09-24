@@ -45,21 +45,17 @@
 
 ## Hosted Beta Blockers
 
-- OIDC/JWKS authentication and automated identity-provider membership lifecycle.
+- Automated identity-provider membership lifecycle (SCIM); OIDC/JWKS sign-in is implemented.
 - Dedicated migration/API/worker PostgreSQL roles plus cross-tenant RLS integration tests.
 - General secret references backed by SSM or Secrets Manager; current AWS external IDs use an environment reference.
 - Database privilege preventing audit `UPDATE`/`DELETE` for runtime roles.
-- Rate and concurrency quotas per tenant.
-- Signed webhooks, replay windows, and egress policy administration.
+- Receiver-side replay windows and egress policy administration (signing and rotation are implemented).
 - Backup restore drill, migration rollback procedure, and incident runbooks.
 - Privacy policy, retention/deletion controls, subprocessor inventory, and data export.
 
 ## Quality Strategy
 
-- Unit: DAG normalization, cycles, retry boundaries, SSRF classification, auth.
-- Integration: real PostgreSQL migrations, idempotency, tenant isolation, concurrent
-  claims, expired leases, and stale-owner rejection.
-- Contract: generated OpenAPI snapshot and RFC 9457 errors.
-- End-to-end: create, ingest, await success, inspect analytics, repeat event.
-- Load in phase 4: sustained ingest, backlog recovery, and tenant fairness.
-- Resilience in phase 4: terminate worker after external effect and before commit.
+Testing follows the trophy model described in [`TESTING.md`](TESTING.md):
+Gherkin acceptance and end-to-end scenarios over the real system carry most of
+the confidence, unit tests are reserved for security and parsing boundaries, and
+a generated OpenAPI snapshot guards the contract.
