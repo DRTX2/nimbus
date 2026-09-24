@@ -1,0 +1,97 @@
+import { randomUUID } from "node:crypto";
+import { expect, type APIRequestContext } from "@playwright/test";
+import { createBdd, test as base } from "playwright-bdd";
+
+const ownerKey = process.env.NIMBUS_E2E_API_KEY ?? "nimbus-local-development-key";
+
+/** Seeds data through the public API so journeys start from a known state. */
+export class NimbusApi {
+  readonly run = randomUUID().slice(0, 8);
+  readonly tokens = new Map<string, string>([["owner", ownerKey]]);
+  readonly remembered = new Map<string, string>();
+
+  constructor(private readonly request: APIRequestContext) {}
+
+  token(name: string): string {
+    const value = this.tokens.get(name);
+    if (!value) throw new Error(`no credential issued for ${name}`);
+    return value;
+  }
+
+  unique(name: string): string {
+    return `${name} ${this.run}`;
+  }
+
+  async call<T = Record<string, unknown>>(method: string, path: string, data?: unknown, as = "owner", headers: Record<string, string> = {}): Promise<T> {
+    const response = await this.request.fetch(path, {
+      method,
+      data,
+      headers: { Authorization: `Bearer ${this.tokens.get(as)}`, ...headers },
+    });
+    expect(response.ok(), `${method} ${path} -> ${response.status()} ${await response.text()}`).toBeTruthy();
+    return response.status() === 204 ? ({} as T) : ((await response.json()) as T);
+  }
+
+  async issueKey(name: string, role: string): Promise<string> {
+    const key = await this.call<{ token: string }>("POST", "/v1/api-keys", { name: this.unique(name), role, expiresInDays: 1 });
+    this.tokens.set(name, key.token);
+    return key.token;
+  }
+
+  async createWorkflow(name: string, eventType: string, approvalRequired = false): Promise<string> {
+    const workflow = await this.call<{ id: string }>("POST", "/v1/workflows", {
+      name: this.unique(name),
+      approvalRequired,
+      definition: { eventType, steps: [{ id: "validate", type: "noop" }, { id: "record", type: "noop", dependsOn: ["validate"] }] },
+    });
+    this.remembered.set(`workflow:${name}`, workflow.id);
+    return workflow.id;
+  }
+
+  async ingest(workflowName: string, eventType: string, as = "owner"): Promise<{ executionId: string; approvalId?: string }> {
+    return this.call("POST", `/v1/workflows/${this.remembered.get(`workflow:${workflowName}`)}/events`, { type: eventType, payload: { orderId: this.run } }, as, {
+      "Idempotency-Key": randomUUID(),
+    });
+  }
+
+  async createFixturePipeline(name: string): Promise<string> {
+    const arn = (kind: string) => `arn:aws:${kind}:us-east-1:123456789012:${name.toLowerCase()}-${this.run}`;
+    const pipeline = await this.call<{ id: string }>("POST", "/v1/pipelines", {
+      name: this.unique(name),
+      mode: "fixture",
+      region: "us-east-1",
+      queueArn: arn("sqs"),
+      lambdaArn: arn("lambda") + "-fn",
+      dlqArn: arn("sqs") + "-dlq",
+    });
+    this.remembered.set(`pipeline:${name}`, pipeline.id);
+    return pipeline.id;
+  }
+
+  async reportStalledConsumer(pipelineName: string): Promise<void> {
+    const size = 5 * 60 * 1000;
+    const end = Math.floor(Date.now() / size) * size;
+    for (const offset of [2, 1]) {
+      const start = end - (offset + 1) * size;
+      await this.call("POST", `/v1/pipelines/${this.remembered.get(`pipeline:${pipelineName}`)}/observations`, {
+        windowStartedAt: new Date(start).toISOString(),
+        windowEndedAt: new Date(start + size).toISOString(),
+        visibleMessages: 900,
+        inFlightMessages: 0,
+        oldestMessageSeconds: 1800,
+        dlqMessages: 0,
+        lambdaInvocations: 0,
+        lambdaErrors: 0,
+        lambdaThrottles: 0,
+      });
+    }
+  }
+}
+
+export const test = base.extend<{ nimbus: NimbusApi }>({
+  nimbus: async ({ request }, use) => {
+    await use(new NimbusApi(request));
+  },
+});
+
+export const { Given, When, Then } = createBdd(test);
