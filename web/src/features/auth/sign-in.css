@@ -1,0 +1,61 @@
+.sign-in {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+}
+
+.sign-in__card {
+  width: min(440px, 100%);
+  padding: var(--space-6);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-raised);
+}
+
+.sign-in__card form {
+  display: grid;
+  gap: var(--space-4);
+  justify-items: start;
+  margin-top: var(--space-5);
+}
+
+.sign-in__card .field {
+  width: 100%;
+}
+
+.sign-in__lede {
+  margin-top: var(--space-2);
+  color: var(--ink-muted);
+}
+
+/* The one decorative gesture: the pipeline a Nimbus user protects. */
+.sign-in__flow {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-5);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+
+.sign-in__flow span {
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--paper);
+}
+
+.sign-in__flow span + span::before {
+  content: "";
+  display: inline-block;
+  width: 22px;
+  height: 1px;
+  margin: 0 12px 3px -32px;
+  background: var(--line-strong);
+}
+
+.sign-in__flow span + span {
+  margin-left: 24px;
+}

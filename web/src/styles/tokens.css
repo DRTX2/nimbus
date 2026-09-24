@@ -1,0 +1,75 @@
+/*
+ * Nimbus console tokens. A cool, low-glare surface for long on-call shifts;
+ * color is reserved for pipeline state so a breach is the loudest thing on
+ * screen.
+ */
+:root {
+  --font-sans: "Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+
+  --paper: #f4f6f9;
+  --surface: #ffffff;
+  --sunken: #eaeef4;
+  --ink: #1a2130;
+  --ink-muted: #58627a;
+  --line: #d6dce6;
+  --line-strong: #b5bfcf;
+
+  --queue: #2e5be6;
+  --queue-ink: #ffffff;
+  --queue-soft: #e3eafd;
+  --ok: #1d8558;
+  --ok-soft: #dcf1e7;
+  --warn: #9a5a00;
+  --warn-soft: #fbecd4;
+  --critical: #c2333b;
+  --critical-soft: #fadfe0;
+  --focus: #2e5be6;
+
+  --radius-control: 6px;
+  --radius-panel: 10px;
+  --shadow-raised: 0 1px 2px rgb(26 33 48 / 8%), 0 4px 16px rgb(26 33 48 / 6%);
+
+  /* Scale follows a 1.2 ratio from a 15px body. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.35rem;
+  --text-2xl: 1.62rem;
+  --text-3xl: 2.33rem;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #10151f;
+    --surface: #171e2b;
+    --sunken: #0c1018;
+    --ink: #e6ebf4;
+    --ink-muted: #98a3b8;
+    --line: #283246;
+    --line-strong: #3a4760;
+    --queue: #6f8fff;
+    --queue-ink: #0c1018;
+    --queue-soft: #1d2a4d;
+    --ok: #4cc28c;
+    --ok-soft: #133526;
+    --warn: #e7a33a;
+    --warn-soft: #3a2a10;
+    --critical: #f0676e;
+    --critical-soft: #3d1a1d;
+    --focus: #8ea7ff;
+    --shadow-raised: 0 1px 2px rgb(0 0 0 / 40%), 0 6px 20px rgb(0 0 0 / 30%);
+    color-scheme: dark;
+  }
+}
