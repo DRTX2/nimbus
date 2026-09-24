@@ -1,10 +1,11 @@
-.PHONY: fmt vet test test-race test-integration build verify security observability validate-deploy dev dev-split dev-down logs clean
+.PHONY: fmt vet test test-race test-db test-integration test-acceptance test-smoke openapi build verify security observability validate-deploy dev dev-split dev-down logs clean
 
 fmt:
 	gofmt -w .
 
 vet:
 	go vet ./...
+	go vet -tags=integration,acceptance ./...
 
 test:
 	go test ./...
@@ -12,8 +13,25 @@ test:
 test-race:
 	go test -race ./...
 
+# Disposable PostgreSQL with the owner/api/worker role split.
+test-db:
+	scripts/test-db.sh up
+
 test-integration:
 	go test -tags=integration -count=1 ./internal/platform/database
+
+# Gherkin scenarios (test/features) against the real API, worker and database.
+# In-process: requires NIMBUS_TEST_*_DATABASE_URL (see `eval "$$(scripts/test-db.sh env)"`).
+test-acceptance:
+	go test -tags=acceptance -count=1 ./test/acceptance
+
+# @smoke scenarios against a running deployment: NIMBUS_BASE_URL and NIMBUS_API_KEY.
+test-smoke:
+	NIMBUS_BASE_URL=$${NIMBUS_BASE_URL:-http://localhost:8080} NIMBUS_API_KEY=$${NIMBUS_API_KEY:-nimbus-local-development-key} \
+		go test -tags=acceptance -count=1 ./test/acceptance
+
+openapi:
+	go run ./cmd/nimbus openapi > api/openapi.json
 
 build:
 	go build -trimpath -o bin/nimbus ./cmd/nimbus
