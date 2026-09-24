@@ -183,7 +183,7 @@ func (a *API) listIncidents(ctx context.Context, _ *struct{}) (*incidentsOutput,
 	if err != nil {
 		return nil, err
 	}
-	items, err := a.store.ListIncidents(ctx, actor.TenantID)
+	items, err := a.store.ListIncidents(ctx, actor.TenantID, store.IncidentFilter{})
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not list incidents")
 	}

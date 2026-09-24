@@ -19,9 +19,11 @@ func (s *Store) GetExecution(ctx context.Context, tenantID, executionID string) 
 	defer func() { _ = tx.Rollback(ctx) }()
 	var result Execution
 	err = tx.QueryRow(ctx, `
-		SELECT id, workflow_id, event_id, status, error, started_at, finished_at, created_at
-		FROM executions WHERE tenant_id = $1 AND id = $2`, tenantID, executionID).
-		Scan(&result.ID, &result.WorkflowID, &result.EventID, &result.Status, &result.Error, &result.StartedAt, &result.FinishedAt, &result.CreatedAt)
+		SELECT e.id, e.workflow_id, v.version, e.event_id, e.status, e.error, e.started_at, e.finished_at, e.created_at
+		FROM executions e
+		JOIN workflow_versions v ON v.tenant_id = e.tenant_id AND v.id = e.workflow_version_id
+		WHERE e.tenant_id = $1 AND e.id = $2`, tenantID, executionID).
+		Scan(&result.ID, &result.WorkflowID, &result.Version, &result.EventID, &result.Status, &result.Error, &result.StartedAt, &result.FinishedAt, &result.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Execution{}, ErrNotFound
 	}
@@ -49,6 +51,59 @@ func (s *Store) GetExecution(ctx context.Context, tenantID, executionID string) 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Execution{}, fmt.Errorf("commit get execution: %w", err)
+	}
+	return result, nil
+}
+
+// ListExecutions returns executions newest first using a keyset cursor.
+func (s *Store) ListExecutions(ctx context.Context, tenantID string, filter ExecutionFilter, page Page) (ExecutionPage, error) {
+	key, err := page.key()
+	if err != nil {
+		return ExecutionPage{}, err
+	}
+	limit := page.normalizedLimit()
+	var afterAt *time.Time
+	var afterID *string
+	if key != nil {
+		afterAt, afterID = &key.At, &key.ID
+	}
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return ExecutionPage{}, fmt.Errorf("begin execution list: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		SELECT e.id, e.workflow_id, w.name, e.status, e.error, e.created_at, e.started_at, e.finished_at
+		FROM executions e
+		JOIN workflows w ON w.tenant_id = e.tenant_id AND w.id = e.workflow_id
+		WHERE e.tenant_id = $1
+		  AND ($2 = '' OR e.status = $2)
+		  AND ($3 = '' OR e.workflow_id = NULLIF($3, '')::uuid)
+		  AND ($4::timestamptz IS NULL OR (e.created_at, e.id) < ($4::timestamptz, $5::uuid))
+		ORDER BY e.created_at DESC, e.id DESC
+		LIMIT $6`, tenantID, filter.Status, filter.WorkflowID, afterAt, afterID, limit+1)
+	if err != nil {
+		return ExecutionPage{}, fmt.Errorf("list executions: %w", err)
+	}
+	defer rows.Close()
+	result := ExecutionPage{Items: make([]ExecutionSummary, 0, limit)}
+	for rows.Next() {
+		var item ExecutionSummary
+		if err := rows.Scan(&item.ID, &item.WorkflowID, &item.WorkflowName, &item.Status, &item.Error, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+			return ExecutionPage{}, fmt.Errorf("scan execution: %w", err)
+		}
+		result.Items = append(result.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return ExecutionPage{}, fmt.Errorf("iterate executions: %w", err)
+	}
+	if len(result.Items) > limit {
+		last := result.Items[limit-1]
+		result.Items = result.Items[:limit]
+		result.NextCursor = encodeCursor(last.CreatedAt, last.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ExecutionPage{}, fmt.Errorf("commit execution list: %w", err)
 	}
 	return result, nil
 }

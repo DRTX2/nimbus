@@ -86,7 +86,8 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 		t.Fatalf("revoked API key authentication error = %v, want forbidden", err)
 	}
 
-	oidcPrincipal, _, err := apiStore.AuthenticateOIDC(ctx, tenantA, "https://nimbus.example.com", "user-123")
+	identity := store.FederatedIdentity{Issuer: "https://nimbus.example.com", Subject: "user-123", DisplayName: "OIDC User", TenantID: tenantA, ExpiresAt: time.Now().Add(10 * time.Minute)}
+	oidcPrincipal, oidcCapability, err := apiStore.AuthenticateOIDC(ctx, identity)
 	if err != nil {
 		t.Fatalf("authenticate OIDC first time: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 		t.Fatalf("OIDC default role = %s, want viewer", oidcPrincipal.Role)
 	}
 
-	oidcPrincipal2, _, err := apiStore.AuthenticateOIDC(ctx, tenantA, "https://nimbus.example.com", "user-123")
+	oidcPrincipal2, _, err := apiStore.AuthenticateOIDC(ctx, identity)
 	if err != nil {
 		t.Fatalf("authenticate OIDC subsequent time: %v", err)
 	}
@@ -114,6 +115,15 @@ func TestHostedRuntimeRoleBoundary(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != workflowA {
 		t.Fatal("current key capability did not establish API tenant scope")
+	}
+	oidcItems, err := apiStore.ListWorkflows(store.WithTenantCapability(ctx, oidcCapability), tenantA)
+	if err != nil || len(oidcItems) != 1 || oidcItems[0].ID != workflowA {
+		t.Fatalf("OIDC session capability did not establish API tenant scope: %v", err)
+	}
+	unknownTenant := identity
+	unknownTenant.TenantID = "00000000-0000-0000-0000-00000000dead"
+	if _, _, err := apiStore.AuthenticateOIDC(ctx, unknownTenant); !errors.Is(err, store.ErrForbidden) {
+		t.Fatalf("OIDC login to unknown tenant error = %v, want forbidden", err)
 	}
 	items, err = apiStore.ListWorkflows(apiCtx, tenantB)
 	if err != nil {
@@ -325,7 +335,7 @@ func assertIncidentQualityLoop(t *testing.T, ctx context.Context, owner, worker 
 		t.Fatalf("unexpected weekly quality item: %+v", item)
 	}
 
-	listed, err := apiStore.ListIncidents(apiCtx, tenantA)
+	listed, err := apiStore.ListIncidents(apiCtx, tenantA, store.IncidentFilter{})
 	if err != nil {
 		t.Fatalf("list reviewed incidents: %v", err)
 	}

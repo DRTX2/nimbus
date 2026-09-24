@@ -339,7 +339,7 @@ func authenticate(repository *store.Store, logger *slog.Logger, oidcValidator *O
 					return
 				}
 				sub, _ := jwtToken.Claims.GetSubject()
-				principal, capability, err = repository.AuthenticateOIDC(request.Context(), tenantID, oidcIssuer, sub)
+				principal, capability, err = repository.AuthenticateOIDC(request.Context(), store.FederatedIdentity{Issuer: oidcIssuer, Subject: sub, DisplayName: sub, TenantID: tenantID, ExpiresAt: time.Now().Add(time.Hour)})
 			} else {
 				principal, capability, err = repository.AuthenticateAPIKey(request.Context(), token)
 			}

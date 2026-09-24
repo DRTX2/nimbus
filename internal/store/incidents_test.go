@@ -46,14 +46,15 @@ func TestContiguousDetectorWindows(t *testing.T) {
 }
 
 func TestValidatePipelineCredentialBoundary(t *testing.T) {
-	valid := Pipeline{Mode: "aws", RoleARN: "arn:aws:iam::123456789012:role/nimbus", ExternalIDRef: "aws-external-id/acme-prod"}
+	valid := Pipeline{Name: "billing", Mode: "aws", RoleARN: "arn:aws:iam::123456789012:role/nimbus", ExternalIDRef: "aws-external-id/acme-prod"}
 	if err := validatePipeline(valid); err != nil {
 		t.Fatalf("valid AWS pipeline rejected: %v", err)
 	}
 	for _, pipeline := range []Pipeline{
-		{Mode: "aws", RoleARN: valid.RoleARN},
-		{Mode: "aws", RoleARN: valid.RoleARN, ExternalIDRef: "NIMBUS_API_KEY"},
-		{Mode: "fixture", ExternalIDRef: valid.ExternalIDRef},
+		{Name: "billing", Mode: "aws", RoleARN: valid.RoleARN},
+		{Name: "billing", Mode: "aws", RoleARN: valid.RoleARN, ExternalIDRef: "NIMBUS_API_KEY"},
+		{Name: "billing", Mode: "fixture", ExternalIDRef: valid.ExternalIDRef},
+		{Mode: "fixture"},
 	} {
 		if err := validatePipeline(pipeline); err == nil {
 			t.Fatalf("invalid pipeline accepted: %+v", pipeline)

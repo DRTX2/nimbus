@@ -88,6 +88,38 @@ func (s *Store) ListWorkflows(ctx context.Context, tenantID string) ([]Workflow,
 	return result, nil
 }
 
+// GetWorkflow returns one workflow with its active definition and all version numbers.
+func (s *Store) GetWorkflow(ctx context.Context, tenantID, workflowID string) (WorkflowDetail, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return WorkflowDetail{}, fmt.Errorf("begin get workflow: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var result WorkflowDetail
+	var definition []byte
+	err = tx.QueryRow(ctx, `
+		SELECT w.id, w.name, w.status, w.active_version, v.definition, w.created_at, w.updated_at, w.approval_required,
+			(SELECT array_agg(version ORDER BY version) FROM workflow_versions
+			 WHERE tenant_id = w.tenant_id AND workflow_id = w.id)
+		FROM workflows w
+		JOIN workflow_versions v ON v.tenant_id = w.tenant_id AND v.workflow_id = w.id AND v.version = w.active_version
+		WHERE w.tenant_id = $1 AND w.id = $2`, tenantID, workflowID).
+		Scan(&result.ID, &result.Name, &result.Status, &result.Version, &definition, &result.CreatedAt, &result.UpdatedAt, &result.ApprovalRequired, &result.Versions)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return WorkflowDetail{}, ErrNotFound
+	}
+	if err != nil {
+		return WorkflowDetail{}, fmt.Errorf("get workflow: %w", err)
+	}
+	if err := json.Unmarshal(definition, &result.Definition); err != nil {
+		return WorkflowDetail{}, fmt.Errorf("decode stored workflow %s: %w", result.ID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkflowDetail{}, fmt.Errorf("commit get workflow: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Store) CreateWorkflowVersion(ctx context.Context, actor Principal, workflowID string, definition workflow.Definition) (Workflow, error) {
 	encoded, err := json.Marshal(definition)
 	if err != nil {

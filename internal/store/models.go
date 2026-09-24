@@ -18,6 +18,11 @@ type Workflow struct {
 	ApprovalRequired bool                `json:"approvalRequired"`
 }
 
+type WorkflowDetail struct {
+	Workflow
+	Versions []int `json:"versions"`
+}
+
 type IngestResult struct {
 	EventID     string `json:"eventId"`
 	ExecutionID string `json:"executionId"`
@@ -30,6 +35,26 @@ type Principal struct {
 	TenantID string `json:"tenantId"`
 	Name     string `json:"name"`
 	Role     string `json:"role"`
+}
+
+// FederatedIdentity is an identity already verified by an external provider.
+type FederatedIdentity struct {
+	Issuer      string
+	Subject     string
+	DisplayName string
+	TenantID    string
+	ExpiresAt   time.Time
+}
+
+type Member struct {
+	ID          string    `json:"id"`
+	PrincipalID string    `json:"principalId"`
+	Kind        string    `json:"kind,omitempty"`
+	DisplayName string    `json:"displayName,omitempty"`
+	Role        string    `json:"role"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type APIKey struct {
@@ -90,6 +115,7 @@ type Observation struct {
 type Incident struct {
 	ID             string          `json:"id"`
 	PipelineID     string          `json:"pipelineId"`
+	PipelineName   string          `json:"pipelineName,omitempty"`
 	Detector       string          `json:"detector"`
 	Status         string          `json:"status"`
 	Severity       string          `json:"severity"`
@@ -128,6 +154,7 @@ type WeeklyIncidentQuality struct {
 type TimelineEvent struct {
 	ID        string          `json:"id"`
 	Type      string          `json:"type"`
+	ActorID   *string         `json:"actorId,omitempty"`
 	Details   json.RawMessage `json:"details"`
 	CreatedAt time.Time       `json:"createdAt"`
 }
@@ -157,6 +184,7 @@ type OutboxMessage struct {
 type Execution struct {
 	ID         string     `json:"id"`
 	WorkflowID string     `json:"workflowId"`
+	Version    int        `json:"workflowVersion"`
 	EventID    string     `json:"eventId"`
 	Status     string     `json:"status"`
 	Error      *string    `json:"error,omitempty"`
@@ -202,4 +230,29 @@ type Analytics struct {
 	SuccessRate         float64 `json:"successRate"`
 	QueuedSteps         int64   `json:"queuedSteps"`
 	OldestQueuedSeconds int64   `json:"oldestQueuedSeconds"`
+}
+
+type ExecutionSummary struct {
+	ID           string     `json:"id"`
+	WorkflowID   string     `json:"workflowId"`
+	WorkflowName string     `json:"workflowName"`
+	Status       string     `json:"status"`
+	Error        *string    `json:"error,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	StartedAt    *time.Time `json:"startedAt,omitempty"`
+	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
+}
+
+type ExecutionFilter struct {
+	Status     string
+	WorkflowID string
+}
+
+type ExecutionPage struct {
+	Items      []ExecutionSummary `json:"items"`
+	NextCursor string             `json:"nextCursor,omitempty"`
+}
+
+type IncidentFilter struct {
+	Status string
 }

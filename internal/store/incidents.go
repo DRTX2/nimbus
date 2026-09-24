@@ -13,6 +13,7 @@ import (
 
 	"github.com/david/nimbus/internal/detector"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const detectorWindowDuration = 5 * time.Minute
@@ -45,6 +46,10 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDRef, pipeline.IncidentWorkflowID,
 		pipeline.ConsecutiveWindows, pipeline.BacklogThreshold, pipeline.AgeThresholdSeconds).
 		Scan(&pipeline.ID, &pipeline.Status, &pipeline.CreatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "23503" || pgErr.Code == "23505") {
+		return Pipeline{}, fmt.Errorf("%w: incident workflow does not exist or the queue/function pair is already monitored", ErrInvalidInput)
+	}
 	if err != nil {
 		return Pipeline{}, fmt.Errorf("create pipeline: %w", err)
 	}
@@ -58,17 +63,20 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 }
 
 func validatePipeline(pipeline Pipeline) error {
+	if strings.TrimSpace(pipeline.Name) == "" {
+		return fmt.Errorf("%w: name is required", ErrInvalidInput)
+	}
 	if pipeline.Mode != "fixture" && pipeline.Mode != "aws" {
-		return errors.New("pipeline mode must be fixture or aws")
+		return fmt.Errorf("%w: pipeline mode must be fixture or aws", ErrInvalidInput)
 	}
 	if pipeline.Mode == "aws" && strings.TrimSpace(pipeline.RoleARN) == "" {
-		return errors.New("roleArn is required for AWS pipelines")
+		return fmt.Errorf("%w: roleArn is required for AWS pipelines", ErrInvalidInput)
 	}
 	if pipeline.Mode == "aws" && !pipelineExternalIDRefPattern.MatchString(pipeline.ExternalIDRef) {
-		return errors.New("externalIdRef is required for AWS pipelines and must use the aws-external-id namespace")
+		return fmt.Errorf("%w: externalIdRef is required for AWS pipelines and must use the aws-external-id namespace", ErrInvalidInput)
 	}
 	if pipeline.Mode == "fixture" && (pipeline.RoleARN != "" || pipeline.ExternalIDRef != "") {
-		return errors.New("fixture pipelines cannot configure AWS credentials")
+		return fmt.Errorf("%w: fixture pipelines cannot configure AWS credentials", ErrInvalidInput)
 	}
 	return nil
 }
@@ -226,7 +234,7 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 			}
 			var timelineExists bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM incident_timeline WHERE tenant_id=$1 AND incident_id=$2 AND event_type='opened')`, actor.TenantID, incident.ID).Scan(&timelineExists); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("check incident timeline: %w", err)
 			}
 			if !timelineExists {
 				_, err = tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,actor_id,details) VALUES ($1,$2,'opened',$3,$4)`, actor.TenantID, incident.ID, actor.ID, evidence)
@@ -239,9 +247,11 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 			}
 			changed = append(changed, incident)
 		} else if counts[name] == 0 {
-			if err := recoverIncidents(ctx, tx, actor, observation.PipelineID, name); err != nil {
+			recovered, err := recoverIncidents(ctx, tx, actor, observation.PipelineID, name)
+			if err != nil {
 				return nil, err
 			}
+			changed = append(changed, recovered...)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -253,35 +263,39 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 // recoverIncidents closes active incidents for a detector after sustained
 // healthy windows. IDs are collected before further statements because a pgx
 // connection cannot execute while a result set is open.
-func recoverIncidents(ctx context.Context, tx pgx.Tx, actor Principal, pipelineID, detectorName string) error {
+func recoverIncidents(ctx context.Context, tx pgx.Tx, actor Principal, pipelineID, detectorName string) ([]Incident, error) {
 	rows, err := tx.Query(ctx, `UPDATE incidents SET status='recovered',recovered_at=now(),updated_at=now()
-		WHERE tenant_id=$1 AND pipeline_id=$2 AND detector=$3 AND status IN ('open','acknowledged') RETURNING id`,
+		WHERE tenant_id=$1 AND pipeline_id=$2 AND detector=$3 AND status IN ('open','acknowledged')
+		RETURNING id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,recovered_at,resolved_at`,
 		actor.TenantID, pipelineID, detectorName)
 	if err != nil {
-		return fmt.Errorf("recover incident: %w", err)
+		return nil, fmt.Errorf("recover incident: %w", err)
 	}
-	var ids []string
+	recovered := make([]Incident, 0, 1)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var incident Incident
+		if err := rows.Scan(&incident.ID, &incident.PipelineID, &incident.Detector, &incident.Status, &incident.Severity, &incident.Summary,
+			&incident.Evidence, &incident.OpenedAt, &incident.AcknowledgedAt, &incident.RecoveredAt, &incident.ResolvedAt); err != nil {
 			rows.Close()
-			return fmt.Errorf("scan recovered incident: %w", err)
+			return nil, fmt.Errorf("scan recovered incident: %w", err)
 		}
-		ids = append(ids, id)
+		recovered = append(recovered, incident)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate recovered incidents: %w", err)
+		return nil, fmt.Errorf("iterate recovered incidents: %w", err)
 	}
-	for _, id := range ids {
-		if _, err := tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,actor_id) VALUES ($1,$2,'recovered',$3)`, actor.TenantID, id, actor.ID); err != nil {
-			return fmt.Errorf("append recovery timeline: %w", err)
+	for _, incident := range recovered {
+		if _, err := tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,actor_id) VALUES ($1,$2,'recovered',$3)`,
+			actor.TenantID, incident.ID, actor.ID); err != nil {
+			return nil, fmt.Errorf("append recovery timeline: %w", err)
 		}
-		if err := insertOutbox(ctx, tx, actor.TenantID, "incident.recovered", "incident", id, "incident:"+id+":recovered", map[string]any{"incidentId": id}); err != nil {
-			return err
+		if err := insertOutbox(ctx, tx, actor.TenantID, "incident.recovered", "incident", incident.ID,
+			"incident:"+incident.ID+":recovered", map[string]any{"incidentId": incident.ID}); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return recovered, nil
 }
 
 // Windows are ordered newest first. Exact UTC boundaries prevent overlapping
@@ -302,48 +316,149 @@ func contiguousDetectorWindows(windows []Observation) bool {
 	return true
 }
 
-func (s *Store) ListIncidents(ctx context.Context, tenantID string) ([]Incident, error) {
+const incidentColumns = `i.id,i.pipeline_id,p.name,i.detector,i.status,i.severity,i.summary,i.evidence,i.opened_at,
+	i.acknowledged_at,i.recovered_at,i.resolved_at,r.id,r.disposition,r.reviewer_principal_id,r.comment,r.reviewed_at
+	FROM incidents i
+	JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
+	LEFT JOIN LATERAL (
+		SELECT id,disposition,reviewer_principal_id,comment,reviewed_at
+		FROM incident_reviews
+		WHERE tenant_id=i.tenant_id AND incident_id=i.id
+		ORDER BY revision DESC LIMIT 1
+	) r ON true`
+
+func scanIncident(row pgx.Row) (Incident, error) {
+	var item Incident
+	var reviewID, disposition, reviewerID *string
+	var comment *string
+	var reviewedAt *time.Time
+	if err := row.Scan(&item.ID, &item.PipelineID, &item.PipelineName, &item.Detector, &item.Status, &item.Severity, &item.Summary, &item.Evidence,
+		&item.OpenedAt, &item.AcknowledgedAt, &item.RecoveredAt, &item.ResolvedAt, &reviewID, &disposition, &reviewerID, &comment, &reviewedAt); err != nil {
+		return Incident{}, err
+	}
+	if reviewID != nil {
+		item.Review = &IncidentReview{ID: *reviewID, Disposition: *disposition, ReviewerPrincipalID: *reviewerID, Comment: comment, ReviewedAt: *reviewedAt}
+	}
+	return item, nil
+}
+
+func (s *Store) ListIncidents(ctx context.Context, tenantID string, filter IncidentFilter) ([]Incident, error) {
 	tx, err := s.beginTenant(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("begin incident list: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	rows, err := tx.Query(ctx, `SELECT i.id,i.pipeline_id,i.detector,i.status,i.severity,i.summary,i.evidence,i.opened_at,
-		i.acknowledged_at,i.recovered_at,i.resolved_at,r.id,r.disposition,r.reviewer_principal_id,r.comment,r.reviewed_at
-		FROM incidents i
-		LEFT JOIN LATERAL (
-			SELECT id,disposition,reviewer_principal_id,comment,reviewed_at
-			FROM incident_reviews
-			WHERE tenant_id=i.tenant_id AND incident_id=i.id
-			ORDER BY revision DESC LIMIT 1
-		) r ON true
-		WHERE i.tenant_id=$1 ORDER BY i.opened_at DESC,i.id LIMIT 100`, tenantID)
+	statuses := []string{"open", "acknowledged", "recovered", "resolved"}
+	switch filter.Status {
+	case "":
+	case "active":
+		statuses = []string{"open", "acknowledged"}
+	default:
+		statuses = []string{filter.Status}
+	}
+	rows, err := tx.Query(ctx, `SELECT `+incidentColumns+`
+		WHERE i.tenant_id=$1 AND i.status = ANY($2) ORDER BY i.opened_at DESC,i.id LIMIT 100`, tenantID, statuses)
 	if err != nil {
 		return nil, fmt.Errorf("list incidents: %w", err)
 	}
 	defer rows.Close()
 	result := make([]Incident, 0)
 	for rows.Next() {
-		var item Incident
-		var reviewID, disposition, reviewerID *string
-		var comment *string
-		var reviewedAt *time.Time
-		if err := rows.Scan(&item.ID, &item.PipelineID, &item.Detector, &item.Status, &item.Severity, &item.Summary, &item.Evidence,
-			&item.OpenedAt, &item.AcknowledgedAt, &item.RecoveredAt, &item.ResolvedAt, &reviewID, &disposition, &reviewerID, &comment, &reviewedAt); err != nil {
-			return nil, err
-		}
-		if reviewID != nil {
-			item.Review = &IncidentReview{ID: *reviewID, Disposition: *disposition, ReviewerPrincipalID: *reviewerID, Comment: comment, ReviewedAt: *reviewedAt}
+		item, err := scanIncident(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan incident: %w", err)
 		}
 		result = append(result, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("iterate incidents: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit incident list: %w", err)
 	}
 	return result, nil
+}
+
+// GetIncident returns an incident with its latest review and full timeline.
+func (s *Store) GetIncident(ctx context.Context, tenantID, incidentID string) (Incident, error) {
+	tx, err := s.beginTenant(ctx, tenantID)
+	if err != nil {
+		return Incident{}, fmt.Errorf("begin get incident: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	incident, err := scanIncident(tx.QueryRow(ctx, `SELECT `+incidentColumns+` WHERE i.tenant_id=$1 AND i.id=$2`, tenantID, incidentID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Incident{}, ErrNotFound
+	}
+	if err != nil {
+		return Incident{}, fmt.Errorf("get incident: %w", err)
+	}
+	rows, err := tx.Query(ctx, `SELECT id,event_type,actor_id,details,created_at FROM incident_timeline
+		WHERE tenant_id=$1 AND incident_id=$2 ORDER BY created_at, id LIMIT 500`, tenantID, incidentID)
+	if err != nil {
+		return Incident{}, fmt.Errorf("load incident timeline: %w", err)
+	}
+	defer rows.Close()
+	incident.Timeline = make([]TimelineEvent, 0)
+	for rows.Next() {
+		var event TimelineEvent
+		if err := rows.Scan(&event.ID, &event.Type, &event.ActorID, &event.Details, &event.CreatedAt); err != nil {
+			return Incident{}, fmt.Errorf("scan incident timeline: %w", err)
+		}
+		incident.Timeline = append(incident.Timeline, event)
+	}
+	if err := rows.Err(); err != nil {
+		return Incident{}, fmt.Errorf("iterate incident timeline: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Incident{}, fmt.Errorf("commit get incident: %w", err)
+	}
+	return incident, nil
+}
+
+// ResolveIncident closes an incident permanently. Resolution is idempotent and
+// publishes incident.resolved through the outbox for downstream automation.
+func (s *Store) ResolveIncident(ctx context.Context, actor Principal, incidentID, note string) error {
+	note = strings.TrimSpace(note)
+	if len([]rune(note)) > maxIncidentReviewCommentLength {
+		return fmt.Errorf("%w: note must be at most %d characters", ErrInvalidInput, maxIncidentReviewCommentLength)
+	}
+	tx, err := s.beginTenant(ctx, actor.TenantID)
+	if err != nil {
+		return fmt.Errorf("begin incident resolution: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status string
+	err = tx.QueryRow(ctx, `SELECT status FROM incidents WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, actor.TenantID, incidentID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load incident for resolution: %w", err)
+	}
+	if status == "resolved" {
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE incidents SET status='resolved',resolved_at=now(),updated_at=now() WHERE tenant_id=$1 AND id=$2`, actor.TenantID, incidentID); err != nil {
+		return fmt.Errorf("resolve incident: %w", err)
+	}
+	details, err := json.Marshal(map[string]any{"previousStatus": status, "note": note})
+	if err != nil {
+		return fmt.Errorf("encode resolution details: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,actor_id,details) VALUES ($1,$2,'resolved',$3,$4)`, actor.TenantID, incidentID, actor.ID, details); err != nil {
+		return fmt.Errorf("append resolution timeline: %w", err)
+	}
+	if err := insertOutbox(ctx, tx, actor.TenantID, "incident.resolved", "incident", incidentID, "incident:"+incidentID+":resolved", map[string]any{"incidentId": incidentID}); err != nil {
+		return err
+	}
+	if err := insertAudit(ctx, tx, actor, "incident.resolve", "incident", incidentID, "succeeded", map[string]any{"previousStatus": status}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit incident resolution: %w", err)
+	}
+	return nil
 }
 
 const maxIncidentReviewCommentLength = 500
