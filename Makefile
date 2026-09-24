@@ -1,4 +1,4 @@
-.PHONY: fmt vet test test-race test-db test-integration test-acceptance test-smoke openapi build verify security observability validate-deploy dev dev-split dev-down logs clean
+.PHONY: fmt vet test test-race test-db test-integration test-acceptance test-smoke openapi web-install web-verify web-build e2e test-all build verify security observability validate-deploy dev dev-split dev-down logs clean
 
 fmt:
 	gofmt -w .
@@ -32,6 +32,28 @@ test-smoke:
 
 openapi:
 	go run ./cmd/nimbus openapi > api/openapi.json
+	npm --prefix web run generate:api
+
+web-install:
+	npm --prefix web ci
+
+# Static checks, contract drift, and Gherkin integration scenarios for the dashboard.
+web-verify:
+	npm --prefix web run check:api
+	npm --prefix web run typecheck
+	npm --prefix web run lint
+	npm --prefix web test
+
+web-build:
+	npm --prefix web run build
+
+# Browser journeys (web/e2e/features) against a running stack, e.g. `make dev-split`.
+e2e:
+	NIMBUS_E2E_BASE_URL=$${NIMBUS_E2E_BASE_URL:-http://127.0.0.1:$${NIMBUS_HTTP_PORT:-8080}} npm --prefix web run e2e
+
+# The whole testing trophy: static + unit, contract, integration, acceptance.
+test-all: verify web-verify
+	eval "$$(scripts/test-db.sh up)" && $(MAKE) test-integration test-acceptance; status=$$?; scripts/test-db.sh down; exit $$status
 
 build:
 	go build -trimpath -o bin/nimbus ./cmd/nimbus
