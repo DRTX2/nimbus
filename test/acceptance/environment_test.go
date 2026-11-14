@@ -28,6 +28,7 @@ import (
 const (
 	webhookSecret      = "acceptance-webhook-secret-0001"
 	tenantIngestionCap = 30
+	tenantAWSChecks    = 3
 	oidcAudience       = "nimbus-acceptance"
 	oidcTenantClaim    = "nimbus_tenant"
 )
@@ -43,6 +44,8 @@ type environment struct {
 	ownerStore *store.Store
 	receiver   *webhookReceiver
 	idp        *identityProvider
+	cloudwatch *scriptedCloudWatch
+	scheduler  *awsmonitor.Scheduler
 	shutdown   func()
 }
 
@@ -97,6 +100,7 @@ func newEnvironment(ctx context.Context) (*environment, error) {
 	api := httptest.NewServer(httpapi.New(httpapi.Options{
 		Store: store.New(apiPool), Metrics: observability.NewMetrics(false), Logger: logger,
 		AWSCollector: awsmonitor.NewCollector(nil), OIDC: verifier, MaxIngestionRate: tenantIngestionCap,
+		MaxAWSChecksPerHour: tenantAWSChecks,
 	}))
 
 	workerStore := store.New(workerPool)
@@ -105,13 +109,16 @@ func newEnvironment(ctx context.Context) (*environment, error) {
 		execution.DefaultConnectors([]string{"127.0.0.1"}, execution.NewSigner(webhookSecret)),
 		execution.WorkerConfig{Count: 4, PollInterval: 50 * time.Millisecond, LeaseDuration: 45 * time.Second, MaxConcurrentSteps: 50})
 	publisher := execution.NewOutboxPublisher(workerStore, logger, 50*time.Millisecond, 45*time.Second)
+	// Scenarios drive the scheduler explicitly so windows stay deterministic.
+	cloudwatch := &scriptedCloudWatch{calls: map[string]int{}}
+	scheduler := awsmonitor.NewScheduler(workerStore, cloudwatch, logger, metrics, time.Minute, tenantAWSChecks)
 	var background sync.WaitGroup
 	background.Go(func() { worker.Run(runCtx) })
 	background.Go(func() { publisher.Run(runCtx) })
 
 	env := &environment{
 		baseURL: api.URL, owner: owner, ownerStore: store.New(owner),
-		receiver: newWebhookReceiver(), idp: idp,
+		receiver: newWebhookReceiver(), idp: idp, cloudwatch: cloudwatch, scheduler: scheduler,
 	}
 	env.shutdown = func() {
 		cancel()
@@ -213,3 +220,37 @@ func (r *webhookReceiver) received(name string) []delivery {
 }
 
 func (r *webhookReceiver) close() { r.server.Close() }
+
+// scriptedCloudWatch stands in for CloudWatch during scheduled checks. It
+// returns the scenario's metric profile for the window that closed last.
+type scriptedCloudWatch struct {
+	mu      sync.Mutex
+	profile map[string]int64
+	calls   map[string]int
+}
+
+func (c *scriptedCloudWatch) report(profile map[string]int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.profile = profile
+}
+
+func (c *scriptedCloudWatch) callsFor(pipelineID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls[pipelineID]
+}
+
+func (c *scriptedCloudWatch) Collect(_ context.Context, pipeline store.Pipeline) (store.Observation, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls[pipeline.ID]++
+	end := time.Now().UTC().Truncate(5 * time.Minute)
+	return store.Observation{
+		PipelineID: pipeline.ID, WindowStartedAt: end.Add(-5 * time.Minute), WindowEndedAt: end,
+		VisibleMessages: c.profile["visibleMessages"], InFlightMessages: c.profile["inFlightMessages"],
+		OldestMessageSeconds: c.profile["oldestMessageSeconds"], DLQMessages: c.profile["dlqMessages"],
+		LambdaInvocations: c.profile["lambdaInvocations"], LambdaErrors: c.profile["lambdaErrors"],
+		LambdaThrottles: c.profile["lambdaThrottles"], Source: "cloudwatch",
+	}, nil
+}

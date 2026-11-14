@@ -46,12 +46,14 @@ func TestLoadRequiresBootstrapKeyOnlyForMigrator(t *testing.T) {
 // Misconfiguration must stop the process rather than run with surprising defaults.
 func TestLoadRejectsMalformedValues(t *testing.T) {
 	for name, value := range map[string]string{
-		"NIMBUS_WORKER_COUNT":         "many",
-		"NIMBUS_POLL_INTERVAL":        "-1s",
-		"NIMBUS_OIDC_ALGORITHMS":      "none",
-		"NIMBUS_WEBHOOK_SECRET":       "short",
-		"NIMBUS_WEB_DIR":              "/definitely/not/here",
-		"NIMBUS_MAX_CONCURRENT_STEPS": "0",
+		"NIMBUS_WORKER_COUNT":            "many",
+		"NIMBUS_POLL_INTERVAL":           "-1s",
+		"NIMBUS_OIDC_ALGORITHMS":         "none",
+		"NIMBUS_WEBHOOK_SECRET":          "short",
+		"NIMBUS_WEB_DIR":                 "/definitely/not/here",
+		"NIMBUS_MAX_CONCURRENT_STEPS":    "0",
+		"NIMBUS_MAX_AWS_CHECKS_PER_HOUR": "0",
+		"NIMBUS_AWS_SCHEDULER_ENABLED":   "sometimes",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("NIMBUS_COMPONENT", "api")

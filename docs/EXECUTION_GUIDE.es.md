@@ -42,7 +42,9 @@ Ejecuta en este orden:
 3. Envia una ventana degradada: no debe abrir incidente si se requieren dos.
 4. Envia la segunda ventana degradada: debe abrir un unico incidente.
 5. Consulta `/v1/incidents`.
-6. Envia dos ventanas saludables: el incidente debe pasar a `recovered`.
+6. Envia dos ventanas saludables: el incidente debe pasar a `recovered` y, si
+   el pipeline tiene `recoveryWorkflowId`, se ejecuta el workflow
+   `nimbus.incident.recovered`.
 
 Los cuerpos completos estan en `PHASES_4_6.md` y `API_REFERENCE.es.md`.
 

@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useState, type ComponentProps, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router";
-import { useCreatePipeline, usePipelines, useWorkflows } from "@/shared/api/queries";
+import { useCreatePipeline, usePipelines, useWorkflows, type Workflow } from "@/shared/api/queries";
 import { useSession } from "@/shared/auth/session";
 import { Button, EmptyState, ErrorNotice, Field, Guard, Loading, PageHeader, Panel, StatusBadge, Time } from "@/shared/ui/ui";
 
@@ -14,6 +14,7 @@ type Draft = {
   roleArn: string;
   externalIdRef: string;
   incidentWorkflowId: string;
+  recoveryWorkflowId: string;
   consecutiveWindows: number;
   backlogThreshold: number;
   ageThresholdSeconds: number;
@@ -29,6 +30,7 @@ const emptyDraft: Draft = {
   roleArn: "",
   externalIdRef: "",
   incidentWorkflowId: "",
+  recoveryWorkflowId: "",
   consecutiveWindows: 2,
   backlogThreshold: 100,
   ageThresholdSeconds: 300,
@@ -49,6 +51,22 @@ export function validatePipelineDraft(draft: Draft): Partial<Record<keyof Draft,
   }
   if (draft.consecutiveWindows < 1 || draft.consecutiveWindows > 10) errors.consecutiveWindows = "Choose between 1 and 10 windows.";
   return errors;
+}
+
+/** Offers only workflows whose trigger matches, so dispatch can never be rejected. */
+function WorkflowSelect({ eventType, workflows, value, onChange, ...control }: { eventType: string; workflows: Workflow[] | undefined; value: string; onChange: (id: string) => void } & Omit<ComponentProps<"select">, "value" | "onChange">) {
+  return (
+    <select {...control} value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">None</option>
+      {(workflows ?? [])
+        .filter((workflow) => workflow.definition.eventType === eventType)
+        .map((workflow) => (
+          <option key={workflow.id} value={workflow.id}>
+            {workflow.name}
+          </option>
+        ))}
+    </select>
+  );
 }
 
 function CreatePipelineForm({ onDone }: { onDone: () => void }) {
@@ -76,6 +94,7 @@ function CreatePipelineForm({ onDone }: { onDone: () => void }) {
         roleArn: aws ? draft.roleArn.trim() : undefined,
         externalIdRef: aws ? draft.externalIdRef.trim() : undefined,
         incidentWorkflowId: draft.incidentWorkflowId || undefined,
+        recoveryWorkflowId: draft.recoveryWorkflowId || undefined,
         consecutiveWindows: draft.consecutiveWindows,
         backlogThreshold: draft.backlogThreshold,
         ageThresholdSeconds: draft.ageThresholdSeconds,
@@ -139,16 +158,10 @@ function CreatePipelineForm({ onDone }: { onDone: () => void }) {
             <input type="number" min={1} value={draft.ageThresholdSeconds} onChange={(event) => set("ageThresholdSeconds", Number(event.target.value))} />
           </Field>
           <Field label="Response workflow" hint="Runs when an incident opens.">
-            <select value={draft.incidentWorkflowId} onChange={(event) => set("incidentWorkflowId", event.target.value)}>
-              <option value="">None</option>
-              {(workflows.data ?? [])
-                .filter((workflow) => workflow.definition.eventType === "nimbus.incident.opened")
-                .map((workflow) => (
-                  <option key={workflow.id} value={workflow.id}>
-                    {workflow.name}
-                  </option>
-                ))}
-            </select>
+            <WorkflowSelect eventType="nimbus.incident.opened" workflows={workflows.data} value={draft.incidentWorkflowId} onChange={(id) => set("incidentWorkflowId", id)} />
+          </Field>
+          <Field label="Recovery workflow" hint="Runs when an incident recovers.">
+            <WorkflowSelect eventType="nimbus.incident.recovered" workflows={workflows.data} value={draft.recoveryWorkflowId} onChange={(id) => set("recoveryWorkflowId", id)} />
           </Field>
         </div>
         <div className="actions-row">

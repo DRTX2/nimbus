@@ -118,3 +118,30 @@ Then("the issued key should no longer work", async ({ request, nimbus }) => {
   const response = await request.get("/v1/me", { headers: { Authorization: `Bearer ${nimbus.tokens.get("issued")}` } });
   expect(response.status()).toBe(401);
 });
+
+When("I add a test pipeline {string} that reports recovery to {string}", async ({ page, nimbus }, name: string, workflow: string) => {
+  const arn = (kind: string) => `arn:aws:${kind}:us-east-1:123456789012:${name.toLowerCase()}-${nimbus.run}`;
+  await page.goto("/app/pipelines");
+  await page.getByRole("button", { name: "Add pipeline" }).click();
+  const form = page.getByRole("region", { name: "Add a pipeline" });
+  await form.getByLabel("Name", { exact: true }).fill(nimbus.unique(name));
+  await form.getByLabel("Queue ARN", { exact: true }).fill(arn("sqs"));
+  await form.getByLabel("Consumer function ARN", { exact: true }).fill(arn("lambda") + "-fn");
+  await form.getByLabel("Dead-letter queue ARN", { exact: true }).fill(arn("sqs") + "-dlq");
+  await form.getByLabel("Recovery workflow", { exact: true }).selectOption({ label: nimbus.unique(workflow) });
+  await form.getByRole("button", { name: "Add pipeline" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: nimbus.unique(name) })).toBeVisible();
+  await nimbus.rememberPipeline(name);
+});
+
+When("pipeline {string} stalls and then recovers", async ({ nimbus }, name: string) => {
+  await nimbus.reportStalledConsumer(name, [4, 3]);
+  await nimbus.reportHealthyConsumer(name, [2, 1]);
+});
+
+Then("the runs list should show a run of workflow {string}", async ({ page, nimbus }, workflow: string) => {
+  await expect(async () => {
+    await page.goto("/app/executions");
+    await expect(page.getByRole("row").filter({ hasText: nimbus.unique(workflow) }).first()).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
+});

@@ -209,6 +209,11 @@ func (s *Store) IngestEvent(ctx context.Context, actor Principal, workflowID, ex
 		return IngestResult{}, fmt.Errorf("%w: got %q, want %q", ErrEventTypeMismatch, eventType, definition.EventType)
 	}
 
+	// Serialize the count and insert per tenant so concurrent requests cannot
+	// all see room under the quota; other tenants are unaffected.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('nimbus.ingest:' || $1::text, 0))`, actor.TenantID); err != nil {
+		return IngestResult{}, fmt.Errorf("lock tenant ingestion: %w", err)
+	}
 	var recentEvents int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM events WHERE tenant_id = $1 AND received_at >= now() - interval '1 minute'`, actor.TenantID).Scan(&recentEvents); err != nil {
 		return IngestResult{}, fmt.Errorf("check ingestion rate: %w", err)

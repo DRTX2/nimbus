@@ -50,6 +50,24 @@ Feature: Explainable pipeline incidents
     Then a "dlq_growth" incident should be open
     And the workflow "Page on-call" should have 1 execution within 15 seconds
 
+  Scenario: A recovered incident notifies responders with actionable context
+    Given the webhook "on-call" responds with statuses "204"
+    And I create a workflow "All clear" triggered by "nimbus.incident.recovered" with steps:
+      | id     | type | webhook |
+      | notify | http | on-call |
+    And a fixture pipeline "orders" that dispatches the workflow "All clear" on recovery
+    And the pipeline reports stalled metrics for the windows starting 20 and 15 minutes ago
+    When the pipeline reports healthy metrics for the windows starting 10 and 5 minutes ago
+    Then a "consumer_stalled" incident should be recovered
+    And the webhook "on-call" should receive a "recovered" notification for "consumer_stalled" on pipeline "orders" within 15 seconds
+
+  Scenario: Incidents cannot be routed to a workflow for another event
+    Given I create a workflow "Order audit" triggered by "order.created" with steps:
+      | id    | type |
+      | audit | noop |
+    When I try to add a fixture pipeline "orders" that dispatches the workflow "Order audit" on recovery
+    Then the response status should be 400
+
   Scenario: Weekly quality reporting counts reviewed incidents
     Given a fixture pipeline "billing"
     And the pipeline reports dead-lettering metrics for the windows starting 15 and 10 minutes ago

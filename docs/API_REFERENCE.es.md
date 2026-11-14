@@ -295,11 +295,18 @@ curl --fail-with-body "$NIMBUS_URL/v1/pipelines" \
     "lambdaArn":"arn:aws:lambda:us-east-1:123456789012:function:orders-consumer",
     "dlqArn":"arn:aws:sqs:us-east-1:123456789012:orders-dlq",
     "incidentWorkflowId":"WORKFLOW_ID",
+    "recoveryWorkflowId":"RECOVERY_WORKFLOW_ID",
     "consecutiveWindows":2,
     "backlogThreshold":100,
     "ageThresholdSeconds":300
   }'
 ```
+
+`incidentWorkflowId` recibe `nimbus.incident.opened` y `recoveryWorkflowId`
+recibe `nimbus.incident.recovered`; ambos son opcionales. Si la version activa
+del workflow escucha otro `eventType`, la API responde `400`. El payload incluye
+`incidentId`, `event`, `pipelineId`, `pipelineName`, `detector`, `severity` y
+`summary`, nunca credenciales ni metricas crudas del cliente.
 
 Respuesta `201`:
 
@@ -372,7 +379,19 @@ curl --fail-with-body -X POST "$NIMBUS_URL/v1/pipelines/$PIPELINE_ID/checks" \
 ```
 
 Respuesta: el mismo formato `{"incidents":[]}`. Devuelve `502` si credenciales,
-AssumeRole o la ventana completa de siete metricas no estan disponibles.
+AssumeRole o la ventana completa de siete metricas no estan disponibles; el
+`detail` incluye un codigo estable y una pista sin datos de AWS:
+`configuration`, `access_denied`, `throttled`, `timeout`, `incomplete_window` o
+`unavailable`.
+Cada intento consume el presupuesto horario del tenant
+(`NIMBUS_MAX_AWS_CHECKS_PER_HOUR`, por defecto 60), aunque AWS falle; al
+agotarse devuelve `429` sin llamar a CloudWatch y cada intento queda en audit
+como `pipeline.check`.
+
+Con `NIMBUS_AWS_SCHEDULER_ENABLED=true`, los workers chequean cada pipeline
+`aws` activo una vez por ventana cerrada de cinco minutos, con jitter de hasta
+dos minutos y el mismo presupuesto por tenant, sin necesidad de llamar a este
+endpoint.
 
 ### `GET /v1/incidents`
 

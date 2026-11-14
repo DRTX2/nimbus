@@ -518,6 +518,17 @@ func assertRuntimeRestrictions(t *testing.T, ctx context.Context, api, worker *p
 	if _, err := worker.Exec(ctx, "SELECT * FROM nimbus_authenticate_api_key('x'::bytea)"); err == nil {
 		t.Fatal("worker role invoked API authentication")
 	}
+	if _, err := api.Exec(ctx, "SELECT * FROM nimbus_due_check_tenants()"); err == nil {
+		t.Fatal("API role enumerated tenants with due pipeline checks")
+	}
+	// The check scheduler may advance its claim cursor and count budget audit
+	// rows, nothing more: no pipeline retuning and no audit metadata reads.
+	if _, err := worker.Exec(ctx, "UPDATE monitored_pipelines SET backlog_threshold=1"); err == nil {
+		t.Fatal("worker role retuned pipelines")
+	}
+	if _, err := worker.Exec(ctx, "SELECT metadata FROM audit_events"); err == nil {
+		t.Fatal("worker role read audit metadata")
+	}
 	tx, err := worker.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)

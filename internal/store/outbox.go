@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,23 +63,9 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 		return fmt.Errorf("begin outbox publish: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if message.Topic == "incident.opened" {
-		var workflowID string
-		err := tx.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,'') FROM incidents i
-			JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
-			WHERE i.tenant_id=$1 AND i.id=$2`, message.TenantID, message.AggregateID).Scan(&workflowID)
-		if err != nil {
-			return fmt.Errorf("load incident workflow: %w", err)
-		}
-		if workflowID != "" {
-			actor, err := s.systemPrincipal(ctx, tx, message.TenantID)
-			if err != nil {
-				return err
-			}
-			payload, _ := json.Marshal(map[string]any{"incidentId": message.AggregateID, "source": "nimbus"})
-			if _, err := s.IngestEvent(ctx, actor, workflowID, "outbox-"+message.ID, "nimbus.incident.opened", payload, math.MaxInt32); err != nil {
-				return fmt.Errorf("dispatch incident workflow: %w", err)
-			}
+	if message.Topic == "incident.opened" || message.Topic == "incident.recovered" {
+		if err := s.dispatchIncidentWorkflow(ctx, tx, message); err != nil {
+			return err
 		}
 	}
 	command, err := tx.Exec(ctx, `UPDATE outbox_messages SET published_at=now(),lease_owner=NULL,lease_until=NULL
@@ -91,6 +78,42 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit outbox publish: %w", err)
+	}
+	return nil
+}
+
+// dispatchIncidentWorkflow ingests an incident lifecycle event into the
+// pipeline's opened or recovery workflow with enough context to act on it.
+func (s *Store) dispatchIncidentWorkflow(ctx context.Context, tx pgx.Tx, message OutboxMessage) error {
+	var openedWorkflowID, recoveryWorkflowID, pipelineID, pipelineName, detector, severity, summary string
+	err := tx.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,''),COALESCE(p.recovery_workflow_id::text,''),
+			p.id,p.name,i.detector,i.severity,i.summary
+		FROM incidents i JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
+		WHERE i.tenant_id=$1 AND i.id=$2`, message.TenantID, message.AggregateID).
+		Scan(&openedWorkflowID, &recoveryWorkflowID, &pipelineID, &pipelineName, &detector, &severity, &summary)
+	if err != nil {
+		return fmt.Errorf("load incident workflow: %w", err)
+	}
+	workflowID := openedWorkflowID
+	if message.Topic == "incident.recovered" {
+		workflowID = recoveryWorkflowID
+	}
+	if workflowID == "" {
+		return nil
+	}
+	actor, err := s.systemPrincipal(ctx, tx, message.TenantID)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"incidentId": message.AggregateID, "event": strings.TrimPrefix(message.Topic, "incident."), "source": "nimbus",
+		"pipelineId": pipelineID, "pipelineName": pipelineName, "detector": detector, "severity": severity, "summary": summary,
+	})
+	if err != nil {
+		return fmt.Errorf("encode incident notification: %w", err)
+	}
+	if _, err := s.IngestEvent(ctx, actor, workflowID, "outbox-"+message.ID, "nimbus."+message.Topic, payload, math.MaxInt32); err != nil {
+		return fmt.Errorf("dispatch incident workflow: %w", err)
 	}
 	return nil
 }

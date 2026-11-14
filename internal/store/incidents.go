@@ -38,17 +38,23 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 		return Pipeline{}, fmt.Errorf("begin pipeline creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireWorkflowTrigger(ctx, tx, actor.TenantID, pipeline.IncidentWorkflowID, "nimbus.incident.opened"); err != nil {
+		return Pipeline{}, err
+	}
+	if err := requireWorkflowTrigger(ctx, tx, actor.TenantID, pipeline.RecoveryWorkflowID, "nimbus.incident.recovered"); err != nil {
+		return Pipeline{}, err
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO monitored_pipelines (tenant_id, name, mode, region, queue_arn, lambda_arn, dlq_arn, role_arn, external_id_ref,
-			incident_workflow_id, consecutive_windows, backlog_threshold, age_threshold_seconds)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,'')::uuid,$11,$12,$13)
+			incident_workflow_id, recovery_workflow_id, consecutive_windows, backlog_threshold, age_threshold_seconds)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,$14)
 		RETURNING id, status, created_at`, actor.TenantID, pipeline.Name, pipeline.Mode, pipeline.Region,
-		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDRef, pipeline.IncidentWorkflowID,
+		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDRef, pipeline.IncidentWorkflowID, pipeline.RecoveryWorkflowID,
 		pipeline.ConsecutiveWindows, pipeline.BacklogThreshold, pipeline.AgeThresholdSeconds).
 		Scan(&pipeline.ID, &pipeline.Status, &pipeline.CreatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && (pgErr.Code == "23503" || pgErr.Code == "23505") {
-		return Pipeline{}, fmt.Errorf("%w: incident workflow does not exist or the queue/function pair is already monitored", ErrInvalidInput)
+		return Pipeline{}, fmt.Errorf("%w: incident or recovery workflow does not exist or the queue/function pair is already monitored", ErrInvalidInput)
 	}
 	if err != nil {
 		return Pipeline{}, fmt.Errorf("create pipeline: %w", err)
@@ -88,7 +94,7 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),COALESCE(incident_workflow_id::text,''),
+		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),COALESCE(incident_workflow_id::text,''),COALESCE(recovery_workflow_id::text,''),
 			status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
@@ -99,7 +105,7 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 	for rows.Next() {
 		var item Pipeline
 		if err := rows.Scan(&item.ID, &item.Name, &item.Mode, &item.Region, &item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef,
-			&item.IncidentWorkflowID, &item.Status, &item.ConsecutiveWindows, &item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt); err != nil {
+			&item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.Status, &item.ConsecutiveWindows, &item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan pipeline: %w", err)
 		}
 		result = append(result, item)
@@ -121,9 +127,9 @@ func (s *Store) GetPipeline(ctx context.Context, tenantID, id string) (Pipeline,
 	defer func() { _ = tx.Rollback(ctx) }()
 	var item Pipeline
 	err = tx.QueryRow(ctx, `SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),
-		COALESCE(incident_workflow_id::text,''),status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
+		COALESCE(incident_workflow_id::text,''),COALESCE(recovery_workflow_id::text,''),status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 AND id=$2`, tenantID, id).Scan(&item.ID, &item.Name, &item.Mode, &item.Region,
-		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.Status, &item.ConsecutiveWindows,
+		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.Status, &item.ConsecutiveWindows,
 		&item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Pipeline{}, ErrNotFound
@@ -616,4 +622,29 @@ func (s *Store) AcknowledgeIncident(ctx context.Context, actor Principal, id str
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// requireWorkflowTrigger rejects routing an incident event to a workflow whose
+// active version listens for another event; the outbox would otherwise retry
+// the dispatch until it is exhausted. An empty ID means no workflow.
+func requireWorkflowTrigger(ctx context.Context, tx pgx.Tx, tenantID, workflowID, eventType string) error {
+	if workflowID == "" {
+		return nil
+	}
+	var trigger string
+	err := tx.QueryRow(ctx, `
+		SELECT v.definition->>'eventType'
+		FROM workflows w
+		JOIN workflow_versions v ON v.tenant_id = w.tenant_id AND v.workflow_id = w.id AND v.version = w.active_version
+		WHERE w.tenant_id = $1 AND w.id::text = $2`, tenantID, workflowID).Scan(&trigger)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: workflow %s does not exist", ErrInvalidInput, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("load workflow trigger: %w", err)
+	}
+	if trigger != eventType {
+		return fmt.Errorf("%w: workflow %s is triggered by %q, want %q", ErrInvalidInput, workflowID, trigger, eventType)
+	}
+	return nil
 }

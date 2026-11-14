@@ -34,7 +34,7 @@
 | P-02 | Explainable detection | Stalled consumer, throttling, non-empty DLQ, and retry storm expose numeric evidence |
 | P-03 | Sustained windows | An incident opens only after the configured number of breached windows |
 | P-04 | Incident lifecycle | Active incidents are unique per detector and recover after sustained healthy windows |
-| P-05 | Notification workflow | `incident.opened` outbox records can idempotently ingest `nimbus.incident.opened` |
+| P-05 | Notification workflow | `incident.opened` and `incident.recovered` outbox records idempotently ingest `nimbus.incident.opened` / `nimbus.incident.recovered` with incident context |
 | G-01 | Identity | API keys are hashed, expiring, revocable, returned once, and tenant scoped |
 | G-02 | Authorization | Four roles enforce permissions in every product handler |
 | G-03 | Approval | Requester cannot approve their own protected execution |

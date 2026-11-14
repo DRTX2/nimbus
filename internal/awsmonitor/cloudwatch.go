@@ -2,7 +2,6 @@ package awsmonitor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -34,10 +33,10 @@ func NewCollector(externalIDs map[string]string) *Collector {
 
 func (c *Collector) Collect(ctx context.Context, pipeline store.Pipeline) (store.Observation, error) {
 	if pipeline.Mode != "aws" {
-		return store.Observation{}, fmt.Errorf("pipeline %s is not an AWS pipeline", pipeline.ID)
+		return store.Observation{}, fmt.Errorf("%w: pipeline %s is not an AWS pipeline", ErrNotConfigured, pipeline.ID)
 	}
 	if pipeline.RoleARN != "" && pipeline.ExternalIDRef == "" {
-		return store.Observation{}, errors.New("AWS external ID reference is required")
+		return store.Observation{}, fmt.Errorf("%w: AWS external ID reference is required", ErrNotConfigured)
 	}
 	externalID, err := c.resolveExternalID(pipeline.ExternalIDRef)
 	if err != nil {
@@ -67,7 +66,7 @@ func (c *Collector) resolveExternalID(ref string) (string, error) {
 	}
 	value, ok := c.externalIDs[ref]
 	if !ok {
-		return "", errors.New("AWS external ID reference is not configured")
+		return "", fmt.Errorf("%w: AWS external ID reference is not configured", ErrNotConfigured)
 	}
 	return value, nil
 }
@@ -98,7 +97,7 @@ func collect(ctx context.Context, client cloudWatchAPI, pipeline store.Pipeline,
 	}
 	for _, id := range []string{"visible", "inflight", "oldest", "dlq", "invocations", "errors", "throttles"} {
 		if _, ok := values[id]; !ok {
-			return store.Observation{}, fmt.Errorf("CloudWatch returned an incomplete metric window: missing %s", id)
+			return store.Observation{}, fmt.Errorf("%w: missing %s", ErrIncompleteWindow, id)
 		}
 	}
 	return store.Observation{PipelineID: pipeline.ID, WindowStartedAt: start, WindowEndedAt: end,

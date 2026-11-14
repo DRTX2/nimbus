@@ -20,6 +20,7 @@ type Metrics struct {
 	EventsDuplicate                    prometheus.Counter
 	StepsCompleted                     *prometheus.CounterVec
 	StepDuration                       *prometheus.HistogramVec
+	PipelineChecks                     *prometheus.CounterVec
 	RunnableSteps                      prometheus.Gauge
 	OldestRunnableStepAgeSeconds       prometheus.Gauge
 	ExpiredStepLeases                  prometheus.Gauge
@@ -46,6 +47,9 @@ func NewMetrics(enableOperational bool) *Metrics {
 			Namespace: "nimbus", Name: "step_duration_seconds", Help: "Step execution duration.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"type"}),
+		PipelineChecks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "nimbus", Name: "pipeline_checks_total", Help: "Scheduled CloudWatch pipeline checks by outcome.",
+		}, []string{"outcome"}),
 		RunnableSteps: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "nimbus", Name: "runnable_steps", Help: "PostgreSQL-authoritative steps runnable now, including reclaimable expired leases.",
 		}),
@@ -69,7 +73,7 @@ func NewMetrics(enableOperational bool) *Metrics {
 		}),
 		registry: registry,
 	}
-	registry.MustRegister(metrics.EventsAccepted, metrics.EventsDuplicate, metrics.StepsCompleted, metrics.StepDuration)
+	registry.MustRegister(metrics.EventsAccepted, metrics.EventsDuplicate, metrics.StepsCompleted, metrics.StepDuration, metrics.PipelineChecks)
 	if enableOperational {
 		registry.MustRegister(metrics.RunnableSteps, metrics.OldestRunnableStepAgeSeconds, metrics.ExpiredStepLeases,
 			metrics.PublishableOutboxMessages, metrics.OldestPublishableOutboxAgeSeconds,

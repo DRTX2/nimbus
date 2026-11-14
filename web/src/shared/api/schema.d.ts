@@ -577,13 +577,21 @@ export interface components {
             consecutiveWindows?: number;
             dlqArn: string;
             externalIdRef?: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description Workflow triggered by nimbus.incident.opened.
+             */
             incidentWorkflowId?: string;
             lambdaArn: string;
             /** @enum {string} */
             mode: "fixture" | "aws";
             name: string;
             queueArn: string;
+            /**
+             * Format: uuid
+             * @description Workflow triggered by nimbus.incident.recovered.
+             */
+            recoveryWorkflowId?: string;
             region: string;
             roleArn?: string;
         };
@@ -938,6 +946,7 @@ export interface components {
             mode: string;
             name: string;
             queueArn: string;
+            recoveryWorkflowId?: string;
             region: string;
             roleArn?: string;
             status: string;

@@ -113,7 +113,12 @@ func startWorkers(ctx context.Context, group *sync.WaitGroup, logger *slog.Logge
 	publisher := execution.NewOutboxPublisher(repository, logger, cfg.PollInterval, cfg.LeaseDuration)
 	operational := observability.NewOperationalRefresher(repository, metrics, logger, cfg.OperationalMetricsInterval)
 	maintenance := execution.NewMaintenance(repository, logger, 5*time.Minute)
-	for _, runner := range []func(context.Context){worker.Run, publisher.Run, operational.Run, maintenance.Run} {
+	runners := []func(context.Context){worker.Run, publisher.Run, operational.Run, maintenance.Run}
+	if cfg.AWSSchedulerEnabled {
+		scheduler := awsmonitor.NewScheduler(repository, awsmonitor.NewCollector(cfg.AWSExternalIDs), logger, metrics, 30*time.Second, cfg.MaxAWSChecksPerHour)
+		runners = append(runners, scheduler.Run)
+	}
+	for _, runner := range runners {
 		group.Go(func() { runner(ctx) })
 	}
 }
@@ -133,7 +138,7 @@ func apiHandler(ctx context.Context, logger *slog.Logger, cfg config.Config, rep
 	return httpapi.New(httpapi.Options{
 		Store: repository, Metrics: metrics, Logger: logger,
 		AWSCollector: awsmonitor.NewCollector(cfg.AWSExternalIDs), OIDC: verifier,
-		MaxIngestionRate: cfg.MaxIngestionRate, WebDir: cfg.WebDir,
+		MaxIngestionRate: cfg.MaxIngestionRate, MaxAWSChecksPerHour: cfg.MaxAWSChecksPerHour, WebDir: cfg.WebDir,
 	}), nil
 }
 

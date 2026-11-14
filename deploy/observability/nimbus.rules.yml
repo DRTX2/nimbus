@@ -64,3 +64,11 @@ groups:
         annotations:
           summary: Nimbus operational queue metrics are stale or absent
           runbook_url: docs/SRE_OPERATIONS.md#stale-or-absent-metrics
+      - alert: NimbusPipelineChecksNotObserving
+        expr: sum(increase(nimbus_pipeline_checks_total{outcome=~"failed|budget_exhausted"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scheduled CloudWatch checks are failing or over budget, leaving pipelines unobserved
+          runbook_url: docs/SRE_OPERATIONS.md#pipeline-checks

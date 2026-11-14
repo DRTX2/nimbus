@@ -99,3 +99,29 @@ tests:
       - eval_time: 15m
         alertname: NimbusOperationalMetricsStale
         exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: nimbus_pipeline_checks_total{job="nimbus-worker",outcome="failed"}
+        values: 0+1x40
+      - series: nimbus_pipeline_checks_total{job="nimbus-worker",outcome="observed"}
+        values: 0+1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NimbusPipelineChecksNotObserving
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Scheduled CloudWatch checks are failing or over budget, leaving pipelines unobserved
+              runbook_url: docs/SRE_OPERATIONS.md#pipeline-checks
+
+  - interval: 1m
+    input_series:
+      - series: nimbus_pipeline_checks_total{job="nimbus-worker",outcome="failed"}
+        values: 3x40
+      - series: nimbus_pipeline_checks_total{job="nimbus-worker",outcome="observed"}
+        values: 0+1x40
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: NimbusPipelineChecksNotObserving
+        exp_alerts: []

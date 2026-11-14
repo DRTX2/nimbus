@@ -3,11 +3,13 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/david/nimbus/internal/awsmonitor"
 	"github.com/david/nimbus/internal/store"
 )
 
@@ -41,7 +43,8 @@ type createPipelineInput struct {
 		DLQARN              string `json:"dlqArn" maxLength:"512"`
 		RoleARN             string `json:"roleArn,omitempty" maxLength:"512"`
 		ExternalIDRef       string `json:"externalIdRef,omitempty" maxLength:"80" pattern:"^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$"`
-		IncidentWorkflowID  string `json:"incidentWorkflowId,omitempty" format:"uuid"`
+		IncidentWorkflowID  string `json:"incidentWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.opened."`
+		RecoveryWorkflowID  string `json:"recoveryWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.recovered."`
 		ConsecutiveWindows  int    `json:"consecutiveWindows,omitempty" minimum:"1" maximum:"10"`
 		BacklogThreshold    int64  `json:"backlogThreshold,omitempty" minimum:"1"`
 		AgeThresholdSeconds int64  `json:"ageThresholdSeconds,omitempty" minimum:"1"`
@@ -54,7 +57,7 @@ func (a *API) createPipeline(ctx context.Context, input *createPipelineInput) (*
 	if err != nil {
 		return nil, err
 	}
-	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDRef: input.Body.ExternalIDRef, IncidentWorkflowID: input.Body.IncidentWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds}
+	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDRef: input.Body.ExternalIDRef, IncidentWorkflowID: input.Body.IncidentWorkflowID, RecoveryWorkflowID: input.Body.RecoveryWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds}
 	result, err := a.store.CreatePipeline(ctx, actor, pipeline)
 	if errors.Is(err, store.ErrInvalidInput) {
 		return nil, huma.Error400BadRequest(err.Error())
@@ -119,12 +122,18 @@ func (a *API) checkPipeline(ctx context.Context, input *checkPipelineInput) (*ob
 	if pipeline.Mode != "aws" {
 		return nil, huma.Error409Conflict("only AWS pipelines can be checked against CloudWatch")
 	}
+	if err := a.store.ReserveAWSCheck(ctx, actor, pipeline.ID, a.maxAWSChecks); errors.Is(err, store.ErrRateLimitExceeded) {
+		return nil, huma.Error429TooManyRequests("tenant CloudWatch check budget exhausted")
+	} else if err != nil {
+		return nil, a.internalError("CloudWatch check could not be reserved", err)
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	observation, err := a.awsCollector.Collect(checkCtx, pipeline)
 	if err != nil {
-		a.logger.Warn("AWS pipeline check failed", "pipeline_id", pipeline.ID, "error", err)
-		return nil, huma.Error502BadGateway("CloudWatch metrics could not be collected")
+		reason := awsmonitor.FailureReason(err)
+		a.logger.Warn("AWS pipeline check failed", "pipeline_id", pipeline.ID, "reason", reason, "error", err)
+		return nil, huma.Error502BadGateway(fmt.Sprintf("CloudWatch metrics could not be collected (%s): %s", reason, awsmonitor.FailureHint(reason)))
 	}
 	incidents, err := a.store.RecordObservation(ctx, actor, observation)
 	if err != nil {

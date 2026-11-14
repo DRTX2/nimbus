@@ -67,7 +67,7 @@ const statusTones: Record<string, Tone> = {
 };
 
 export function humanize(value: string): string {
-  const text = value.replaceAll("_", " ");
+  const text = value.replaceAll("_", " ").replace(/\bdlq\b/g, "DLQ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 

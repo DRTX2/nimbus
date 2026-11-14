@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cucumber/godog"
@@ -44,6 +46,19 @@ func registerWorkflowSteps(sc *godog.ScenarioContext, w *world) {
 			if err := w.ingest(ctx, eventType, fmt.Sprintf("burst-%d", index), map[string]any{}); err != nil {
 				return err
 			}
+		}
+		return nil
+	})
+	sc.Step(`^I ingest (\d+) distinct "([^"]*)" events concurrently$`, func(ctx context.Context, count int, eventType string) error {
+		return w.ingestConcurrently(ctx, count, eventType)
+	})
+	sc.Step(`^exactly (\d+) events should be accepted and the rest rejected with status (\d+)$`, func(accepted, rejected int) error {
+		counts := map[int]int{}
+		for _, status := range w.statuses {
+			counts[status]++
+		}
+		if counts[http.StatusAccepted] != accepted || counts[rejected] != len(w.statuses)-accepted {
+			return fmt.Errorf("status counts = %v, want %d accepted and the rest %d", counts, accepted, rejected)
 		}
 		return nil
 	})
@@ -302,4 +317,35 @@ func validSignature(delivery delivery) bool {
 	mac.Write([]byte(timestamp + "."))
 	mac.Write(delivery.body)
 	return delivery.header.Get("Nimbus-Signature") == "t="+timestamp+",v1="+hex.EncodeToString(mac.Sum(nil))
+}
+
+// ingestConcurrently fires every request at once so quota checks race; the
+// world's single-response fields are not touched from the goroutines.
+func (w *world) ingestConcurrently(ctx context.Context, count int, eventType string) error {
+	statuses := make([]int, count)
+	errs := make([]error, count)
+	var wg sync.WaitGroup
+	for index := range count {
+		wg.Go(func() {
+			body := strings.NewReader(fmt.Sprintf(`{"type":%q,"payload":{}}`, eventType))
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, w.env.baseURL+"/v1/workflows/"+w.vars["workflowId"]+"/events", body)
+			if err != nil {
+				errs[index] = err
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+w.tokens[w.actor])
+			request.Header.Set("Idempotency-Key", fmt.Sprintf("%s-concurrent-%d", w.scenarioID, index))
+			response, err := w.client.Do(request)
+			if err != nil {
+				errs[index] = err
+				return
+			}
+			_ = response.Body.Close()
+			statuses[index] = response.StatusCode
+		})
+	}
+	wg.Wait()
+	w.statuses = statuses
+	return errors.Join(errs...)
 }

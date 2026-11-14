@@ -90,6 +90,7 @@ type Pipeline struct {
 	RoleARN             string    `json:"roleArn,omitempty"`
 	ExternalIDRef       string    `json:"externalIdRef,omitempty"`
 	IncidentWorkflowID  string    `json:"incidentWorkflowId,omitempty"`
+	RecoveryWorkflowID  string    `json:"recoveryWorkflowId,omitempty"`
 	Status              string    `json:"status"`
 	ConsecutiveWindows  int       `json:"consecutiveWindows"`
 	BacklogThreshold    int64     `json:"backlogThreshold"`

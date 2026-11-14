@@ -33,6 +33,8 @@ type Options struct {
 	AWSCollector     *awsmonitor.Collector
 	OIDC             *OIDCVerifier
 	MaxIngestionRate int
+	// MaxAWSChecksPerHour bounds CloudWatch calls (and their cost) per tenant.
+	MaxAWSChecksPerHour int
 	// WebDir, when set, serves the built dashboard at /app/.
 	WebDir string
 }
@@ -43,6 +45,7 @@ type API struct {
 	logger           *slog.Logger
 	awsCollector     *awsmonitor.Collector
 	maxIngestionRate int
+	maxAWSChecks     int
 }
 
 // New builds the public HTTP handler: middleware, OpenAPI operations, Scalar
@@ -62,6 +65,7 @@ func New(options Options) http.Handler {
 	handler := &API{
 		store: options.Store, metrics: options.Metrics, logger: options.Logger,
 		awsCollector: options.AWSCollector, maxIngestionRate: options.MaxIngestionRate,
+		maxAWSChecks: options.MaxAWSChecksPerHour,
 	}
 	handler.register(api)
 	return otelhttp.NewHandler(router, "nimbus.http")

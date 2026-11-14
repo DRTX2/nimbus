@@ -25,10 +25,75 @@ var metricProfiles = map[string]map[string]int64{
 
 func registerIncidentSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^a fixture pipeline "([^"]*)"$`, func(ctx context.Context, name string) error {
-		return w.createPipeline(ctx, name, "")
+		return w.createPipeline(ctx, name, nil)
 	})
 	sc.Step(`^a fixture pipeline "([^"]*)" that dispatches the workflow "([^"]*)"$`, func(ctx context.Context, name, workflow string) error {
-		return w.createPipeline(ctx, name, w.vars["workflow:"+workflow])
+		return w.createPipeline(ctx, name, map[string]any{"incidentWorkflowId": w.vars["workflow:"+workflow]})
+	})
+	sc.Step(`^a fixture pipeline "([^"]*)" that dispatches the workflow "([^"]*)" on recovery$`, func(ctx context.Context, name, workflow string) error {
+		return w.createPipeline(ctx, name, map[string]any{"recoveryWorkflowId": w.vars["workflow:"+workflow]})
+	})
+	sc.Step(`^I try to add a fixture pipeline "([^"]*)" that dispatches the workflow "([^"]*)" on recovery$`, func(ctx context.Context, name, workflow string) error {
+		if err := w.createPipeline(ctx, name, map[string]any{"recoveryWorkflowId": w.vars["workflow:"+workflow]}); err != nil && w.status == http.StatusCreated {
+			return err
+		}
+		return nil
+	})
+	sc.Step(`^the webhook "([^"]*)" should receive an? "(opened|recovered)" notification for "([^"]*)" on pipeline "([^"]*)" within (\d+) seconds$`, func(ctx context.Context, hook, event, detector, pipeline string, seconds int) error {
+		return eventually(ctx, time.Duration(seconds)*time.Second, func() error {
+			for _, delivery := range w.env.receiver.received(w.hook(hook)) {
+				var notification map[string]any
+				if err := json.Unmarshal(delivery.body, &notification); err != nil {
+					return err
+				}
+				summary, _ := notification["summary"].(string)
+				if notification["event"] == event && notification["detector"] == detector && notification["pipelineName"] == pipeline &&
+					notification["incidentId"] == w.vars["incidentId"] && summary != "" {
+					return nil
+				}
+			}
+			return fmt.Errorf("webhook %s has no %s %s notification for %s", hook, event, detector, pipeline)
+		})
+	})
+	// The external ID reference is never configured here, so checks fail before
+	// any AWS call while still spending the tenant budget.
+	sc.Step(`^an AWS pipeline "([^"]*)"$`, func(ctx context.Context, name string) error {
+		return w.createAWSPipeline(ctx, name, 2)
+	})
+	sc.Step(`^an AWS pipeline "([^"]*)" that opens incidents after (\d+) windows?$`, w.createAWSPipeline)
+	sc.Step(`^CloudWatch reports (healthy|stalled|dead-lettering|throttled|retry-storming) metrics$`, func(profile string) {
+		w.env.cloudwatch.report(metricProfiles[profile])
+	})
+	sc.Step(`^the CloudWatch scheduler runs$`, func(ctx context.Context) {
+		w.env.scheduler.RunOnce(ctx)
+	})
+	sc.Step(`^the CloudWatch scheduler runs (\d+) times$`, func(ctx context.Context, runs int) {
+		for range runs {
+			w.env.scheduler.RunOnce(ctx)
+		}
+	})
+	sc.Step(`^CloudWatch should have been called (\d+) times? for the pipeline$`, func(want int) error {
+		if got := w.env.cloudwatch.callsFor(w.vars["pipelineId"]); got != want {
+			return fmt.Errorf("CloudWatch calls = %d, want %d", got, want)
+		}
+		return nil
+	})
+	sc.Step(`^I check the pipeline against CloudWatch (\d+) times?$`, func(ctx context.Context, count int) error {
+		w.statuses = nil
+		for range count {
+			if err := w.request(ctx, http.MethodPost, "/v1/pipelines/"+w.vars["pipelineId"]+"/checks", nil, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	sc.Step(`^(\d+) checks should be attempted and the rest rejected with status (\d+)$`, func(attempted, rejected int) error {
+		for index, status := range w.statuses {
+			if (index < attempted) == (status == rejected) {
+				return fmt.Errorf("check %d status = %d, want %d only after %d attempts (all: %v)", index, status, rejected, attempted, w.statuses)
+			}
+		}
+		return nil
 	})
 	sc.Step(`^the pipeline reports (healthy|stalled|dead-lettering|throttled|retry-storming) metrics for the windows starting (\d+) and (\d+) minutes ago$`, func(ctx context.Context, profile string, first, second int) error {
 		for _, minutes := range []int{first, second} {
@@ -129,7 +194,7 @@ func registerIncidentSteps(sc *godog.ScenarioContext, w *world) {
 	})
 }
 
-func (w *world) createPipeline(ctx context.Context, name, workflowID string) error {
+func (w *world) createPipeline(ctx context.Context, name string, overrides map[string]any) error {
 	suffix := w.scenarioID
 	body := map[string]any{
 		"name": name, "mode": "fixture", "region": "us-east-1", "consecutiveWindows": 2,
@@ -137,8 +202,8 @@ func (w *world) createPipeline(ctx context.Context, name, workflowID string) err
 		"lambdaArn": "arn:aws:lambda:us-east-1:123456789012:function:" + name + "-" + suffix,
 		"dlqArn":    "arn:aws:sqs:us-east-1:123456789012:" + name + "-dlq-" + suffix,
 	}
-	if workflowID != "" {
-		body["incidentWorkflowId"] = workflowID
+	for key, value := range overrides {
+		body[key] = value
 	}
 	if err := w.request(ctx, http.MethodPost, "/v1/pipelines", body, nil); err != nil {
 		return err
@@ -149,6 +214,13 @@ func (w *world) createPipeline(ctx context.Context, name, workflowID string) err
 	id, err := w.stringField("id")
 	w.vars["pipelineId"] = id
 	return err
+}
+
+func (w *world) createAWSPipeline(ctx context.Context, name string, windows int) error {
+	return w.createPipeline(ctx, name, map[string]any{
+		"mode": "aws", "roleArn": "arn:aws:iam::123456789012:role/nimbus-read",
+		"externalIdRef": "aws-external-id/acceptance-unconfigured", "consecutiveWindows": windows,
+	})
 }
 
 func (w *world) observe(ctx context.Context, profile string, minutesAgo int) error {

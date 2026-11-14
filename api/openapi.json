@@ -339,6 +339,7 @@
             "type": "string"
           },
           "incidentWorkflowId": {
+            "description": "Workflow triggered by nimbus.incident.opened.",
             "format": "uuid",
             "type": "string"
           },
@@ -360,6 +361,11 @@
           },
           "queueArn": {
             "maxLength": 512,
+            "type": "string"
+          },
+          "recoveryWorkflowId": {
+            "description": "Workflow triggered by nimbus.incident.recovered.",
+            "format": "uuid",
             "type": "string"
           },
           "region": {
@@ -1283,6 +1289,9 @@
             "type": "string"
           },
           "queueArn": {
+            "type": "string"
+          },
+          "recoveryWorkflowId": {
             "type": "string"
           },
           "region": {

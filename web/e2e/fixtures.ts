@@ -68,21 +68,34 @@ export class NimbusApi {
     return pipeline.id;
   }
 
-  async reportStalledConsumer(pipelineName: string): Promise<void> {
+  async rememberPipeline(name: string): Promise<void> {
+    const { items } = await this.call<{ items: { id: string; name: string }[] }>("GET", "/v1/pipelines");
+    const pipeline = items.find((item) => item.name === this.unique(name));
+    if (!pipeline) throw new Error(`pipeline ${name} was not created`);
+    this.remembered.set(`pipeline:${name}`, pipeline.id);
+  }
+
+  async reportStalledConsumer(pipelineName: string, windowsAgo = [2, 1]): Promise<void> {
+    await this.reportWindows(pipelineName, windowsAgo, { visibleMessages: 900, oldestMessageSeconds: 1800, lambdaInvocations: 0 });
+  }
+
+  async reportHealthyConsumer(pipelineName: string, windowsAgo: number[]): Promise<void> {
+    await this.reportWindows(pipelineName, windowsAgo, { visibleMessages: 3, oldestMessageSeconds: 5, lambdaInvocations: 120 });
+  }
+
+  private async reportWindows(pipelineName: string, windowsAgo: number[], metrics: { visibleMessages: number; oldestMessageSeconds: number; lambdaInvocations: number }): Promise<void> {
     const size = 5 * 60 * 1000;
     const end = Math.floor(Date.now() / size) * size;
-    for (const offset of [2, 1]) {
+    for (const offset of windowsAgo) {
       const start = end - (offset + 1) * size;
       await this.call("POST", `/v1/pipelines/${this.remembered.get(`pipeline:${pipelineName}`)}/observations`, {
         windowStartedAt: new Date(start).toISOString(),
         windowEndedAt: new Date(start + size).toISOString(),
-        visibleMessages: 900,
         inFlightMessages: 0,
-        oldestMessageSeconds: 1800,
         dlqMessages: 0,
-        lambdaInvocations: 0,
         lambdaErrors: 0,
         lambdaThrottles: 0,
+        ...metrics,
       });
     }
   }

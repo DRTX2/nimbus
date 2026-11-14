@@ -42,6 +42,8 @@ type Config struct {
 	OIDC                       OIDC
 	WebhookSecrets             []string
 	MaxIngestionRate           int
+	MaxAWSChecksPerHour        int
+	AWSSchedulerEnabled        bool
 	MaxConcurrentSteps         int
 	WebDir                     string
 }
@@ -95,9 +97,11 @@ func Load() (Config, error) {
 			Algorithms:  csv(env("NIMBUS_OIDC_ALGORITHMS", "RS256,ES256"), false),
 			TenantClaim: strings.TrimSpace(os.Getenv("NIMBUS_OIDC_TENANT_CLAIM")),
 		},
-		MaxIngestionRate:   envInt("NIMBUS_MAX_INGESTION_RATE", 1000, &problems),
-		MaxConcurrentSteps: envInt("NIMBUS_MAX_CONCURRENT_STEPS", 50, &problems),
-		WebDir:             strings.TrimSpace(os.Getenv("NIMBUS_WEB_DIR")),
+		MaxIngestionRate:    envInt("NIMBUS_MAX_INGESTION_RATE", 1000, &problems),
+		MaxAWSChecksPerHour: envInt("NIMBUS_MAX_AWS_CHECKS_PER_HOUR", 60, &problems),
+		AWSSchedulerEnabled: envBool("NIMBUS_AWS_SCHEDULER_ENABLED", false, &problems),
+		MaxConcurrentSteps:  envInt("NIMBUS_MAX_CONCURRENT_STEPS", 50, &problems),
+		WebDir:              strings.TrimSpace(os.Getenv("NIMBUS_WEB_DIR")),
 	}
 	cfg.OutboundAllowedHosts = csv(os.Getenv("NIMBUS_OUTBOUND_ALLOWED_HOSTS"), true)
 	for _, name := range []string{"NIMBUS_WEBHOOK_SECRET", "NIMBUS_WEBHOOK_PREVIOUS_SECRET"} {
@@ -144,6 +148,9 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxIngestionRate < 1 {
 		problems = append(problems, errors.New("NIMBUS_MAX_INGESTION_RATE must be greater than 0"))
+	}
+	if cfg.MaxAWSChecksPerHour < 1 {
+		problems = append(problems, errors.New("NIMBUS_MAX_AWS_CHECKS_PER_HOUR must be greater than 0"))
 	}
 	if cfg.MaxConcurrentSteps < 1 {
 		problems = append(problems, errors.New("NIMBUS_MAX_CONCURRENT_STEPS must be greater than 0"))
@@ -219,6 +226,19 @@ func envInt(name string, fallback int, problems *[]error) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		*problems = append(*problems, fmt.Errorf("%s must be an integer", name))
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(name string, fallback bool, problems *[]error) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		*problems = append(*problems, fmt.Errorf("%s must be a boolean", name))
 		return fallback
 	}
 	return parsed
