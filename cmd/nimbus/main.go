@@ -32,6 +32,15 @@ func main() {
 		fmt.Println(string(spec))
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "verify-schema" {
+		// Answers "can this binary serve this database?" for restores and rollbacks.
+		if err := verifySchema(context.Background(), os.Getenv("NIMBUS_DATABASE_URL")); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("schema matches this binary")
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(logger); err != nil {
 		logger.Error("Nimbus stopped", "error", err)
@@ -86,6 +95,20 @@ func run(logger *slog.Logger) error {
 		}
 	}
 	return serve(rootCtx, logger, cfg, handler, &background)
+}
+
+func verifySchema(ctx context.Context, databaseURL string) error {
+	if databaseURL == "" {
+		return errors.New("NIMBUS_DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	pool, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	return database.VerifySchema(ctx, pool)
 }
 
 func migrate(ctx context.Context, logger *slog.Logger, cfg config.Config, repository *store.Store, pool *pgxpool.Pool) error {

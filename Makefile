@@ -1,4 +1,4 @@
-.PHONY: fmt vet test test-race test-db test-integration test-acceptance test-smoke openapi web-install web-verify web-build e2e test-all build verify security observability validate-deploy dev dev-split dev-down logs clean
+.PHONY: fmt vet test test-race test-db test-integration test-acceptance test-smoke openapi web-install web-verify web-build e2e test-all build verify security observability validate-deploy restore-drill dev dev-split dev-down logs clean
 
 fmt:
 	gofmt -w cmd internal test
@@ -53,7 +53,8 @@ e2e:
 
 # The whole testing trophy: static + unit, contract, integration, acceptance.
 test-all: verify web-verify
-	eval "$$(scripts/test-db.sh up)" && $(MAKE) test-integration test-acceptance; status=$$?; scripts/test-db.sh down; exit $$status
+	# Sequential on purpose: both suites share one database even under make -j.
+	eval "$$(scripts/test-db.sh up)" && $(MAKE) test-integration && $(MAKE) test-acceptance; status=$$?; scripts/test-db.sh down; exit $$status
 
 build:
 	go build -trimpath -o bin/nimbus ./cmd/nimbus
@@ -69,6 +70,10 @@ observability:
 	docker run --rm --entrypoint promtool -v "$(CURDIR)/deploy/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 check config /etc/prometheus/prometheus.yml
 	docker run --rm --entrypoint promtool -v "$(CURDIR)/deploy/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 check config /etc/prometheus/prometheus-split.yml
 	docker run --rm --entrypoint promtool -v "$(CURDIR)/deploy/observability:/etc/prometheus:ro" prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996 test rules /etc/prometheus/nimbus.rules.test.yml
+
+# Dump, restore into a disposable PostgreSQL, verify checksums and row counts.
+restore-drill:
+	scripts/restore-drill.sh
 
 validate-deploy:
 	docker compose config --quiet
