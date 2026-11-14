@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(make fmt)",
+      "Bash(make vet)",
+      "Bash(make test)",
+      "Bash(make test-race)",
+      "Bash(make build)",
+      "Bash(make verify)",
+      "Bash(make security)",
+      "Bash(make openapi)",
+      "Bash(make web-verify)",
+      "Bash(make web-build)",
+      "Bash(make observability)",
+      "Bash(make validate-deploy)",
+      "Bash(make test-db)",
+      "Bash(make test-integration)",
+      "Bash(make test-acceptance)",
+      "Bash(make test-all)",
+      "Bash(make e2e)",
+      "Bash(make dev)",
+      "Bash(make dev-split)",
+      "Bash(make dev-down)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(go build *)",
+      "Bash(go mod verify)",
+      "Bash(go mod tidy *)",
+      "Bash(go run ./cmd/nimbus *)",
+      "Bash(gofmt *)",
+      "Bash(scripts/test-db.sh *)",
+      "Bash(npm --prefix web run *)",
+      "Bash(npm --prefix web test *)",
+      "Bash(npm --prefix web ci)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(docker ps *)",
+      "Bash(docker logs *)"
+    ],
+    "ask": [
+      "Bash(terraform apply *)",
+      "Bash(kubectl apply *)",
+      "Bash(aws *)",
+      "Bash(git push *)",
+      "Bash(docker push *)",
+      "Bash(npm --prefix web install *)",
+      "Bash(go get *)"
+    ],
+    "deny": [
+      "Bash(terraform destroy *)",
+      "Bash(kubectl delete *)",
+      "Read(./.env)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; case \"$f\" in *.go) gofmt -w \"$f\";; esac; } 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
