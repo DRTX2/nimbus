@@ -1,10 +1,34 @@
 # Nimbus
 
+[![CI](https://github.com/DRTX2/nimbus/actions/workflows/ci.yml/badge.svg)](https://github.com/DRTX2/nimbus/actions/workflows/ci.yml)
+[![Security](https://github.com/DRTX2/nimbus/actions/workflows/security.yml/badge.svg)](https://github.com/DRTX2/nimbus/actions/workflows/security.yml)
+![Go 1.26](https://img.shields.io/badge/go-1.26-00ADD8)
+![License MIT](https://img.shields.io/badge/license-MIT-blue)
+
 Nimbus is an open-source guardian for revenue-sensitive AWS asynchronous
 pipelines. It turns sustained SQS, Lambda, and DLQ symptoms into explainable,
 deduplicated incidents without reading queue payloads or application logs. A
 durable event automation engine preserves the evidence needed to answer:
 **what happened, why did Nimbus alert, and what ran next?**
+
+![Incident view: the stalled consumer is highlighted with the evidence window](docs/images/incident.png)
+
+## Engineering Highlights
+
+- **Durable execution without a broker:** PostgreSQL leases with
+  `FOR UPDATE SKIP LOCKED`, fenced commits after a lost lease, exponential
+  retries, idempotent ingestion, and a transactional outbox.
+- **Multi-tenant isolation in the database:** forced row-level security on every
+  tenant table, separate owner/API/worker roles, and tenant identity derived
+  only from API keys or OIDC tokens.
+- **Explainable detection:** four rule-based detectors over five-minute
+  SQS/Lambda/DLQ windows, deduplicated incidents with a timeline, and a
+  jittered CloudWatch scheduler bounded by a per-tenant call budget.
+- **Tested as a system:** 71 Gherkin acceptance scenarios against the real API,
+  worker and PostgreSQL role split, 15 Playwright journeys, Gherkin UI tests,
+  race detector, and a restore drill that proves backups are servable.
+- **Operable and supply-chain aware:** Prometheus alerts with rule tests,
+  OTLP traces, runbooks, SHA-pinned Actions, CodeQL, Trivy, SBOM, and govulncheck.
 
 The repository is intentionally a modular monolith. PostgreSQL is the source of
 truth and durable queue; Redis, NATS, microservices, and managed Kubernetes are
@@ -35,8 +59,12 @@ market category. See [`docs/PRODUCT.md`](docs/PRODUCT.md).
 - Expose execution state, 24-hour operational analytics, Prometheus metrics,
   OTLP traces, health probes, OpenAPI, and Scalar documentation.
 - Register fixture or AWS SQS/Lambda/DLQ pipelines and evaluate four explainable detectors.
+- Check AWS pipelines on a jittered five-minute schedule (opt-in) within a
+  per-tenant CloudWatch budget, classifying failures as configuration, access,
+  throttling, timeout, partial data, or unavailability.
 - Deduplicate incidents, retain a timeline, acknowledge them, and recover them automatically.
-- Dispatch incident workflows through a transactional outbox with bounded polling.
+- Dispatch separate response and recovery workflows through a transactional
+  outbox, with the incident, pipeline and detector as context.
 - Issue and revoke tenant API keys with `owner`, `operator`, `approver`, or `viewer` roles.
 - Pause protected executions until a different principal approves or rejects them.
 - Deploy the same image as `all`, `api`, or `worker` without introducing a broker.
@@ -50,23 +78,29 @@ Execution is **at-least-once**. HTTP destinations receive a stable
 `Idempotency-Key`, but the destination must honor it to prevent duplicate side
 effects after a network or process failure.
 
+## Screens
+
+| Overview | Pipeline |
+| --- | --- |
+| ![Overview with open incidents and 24-hour run statistics](docs/images/overview.png) | ![Pipeline with its watched queue, consumer and DLQ](docs/images/pipeline.png) |
+| **Workflow DAG** | **Run** |
+| ![Workflow version shown as parallel stages](docs/images/workflow.png) | ![Run with per-step status and attempts](docs/images/run.png) |
+
+Screenshots are generated from a local stack by `node web/scripts/screenshots.mjs`.
+
 ## Architecture
 
-```text
-Client / alert / webhook
-          |
-          v
-  Go API + Scalar docs
-          |
-          v
-   PostgreSQL transaction
-   event + execution + steps
-          |
-          v
- bounded worker pool -----> HTTP connector
- leases / retry / DAG       SSRF guard + timeout
-          |
-          +----> Prometheus / OTLP / JSON logs
+```mermaid
+flowchart LR
+  client[Client / webhook] -->|API key or OIDC| api[Go API<br/>Huma + Chi]
+  ui[React dashboard] --> api
+  api -->|one transaction| pg[(PostgreSQL<br/>RLS, queue, outbox)]
+  scheduler[CloudWatch scheduler] -->|read-only AssumeRole| cw[(AWS CloudWatch)]
+  scheduler --> pg
+  pg -->|SKIP LOCKED leases| worker[Worker pool]
+  worker -->|SSRF-guarded, signed| http[HTTP destinations]
+  pg -->|outbox| worker
+  api & worker --> obs[Prometheus / OTLP / JSON logs]
 ```
 
 Code is grouped by business capability rather than framework layers:
@@ -77,7 +111,7 @@ internal/workflow             workflow contract and DAG validation
 internal/store                tenant-scoped PostgreSQL operations
 internal/execution            worker runtime and connectors
 internal/detector             explainable pipeline detection rules
-internal/awsmonitor           bounded, read-only CloudWatch adapter
+internal/awsmonitor           bounded, read-only CloudWatch adapter and check scheduler
 internal/httpapi              Huma/Chi API, auth (API key + OIDC), RBAC, dashboard hosting
 internal/platform             database and observability
 api/openapi.json              generated contract snapshot (see api/README.md)
@@ -199,8 +233,9 @@ Security controls implemented today:
 
 This is a production-oriented portfolio beta, not yet a hosted production security boundary.
 OIDC/JWKS, signed webhooks with key rotation, and per-tenant ingestion and
-concurrency quotas are implemented. Encrypted general-purpose secret references
-and restore evidence remain blockers. See
+concurrency quotas are implemented. A local restore drill (`make restore-drill`)
+verifies dumps end to end; encrypted general-purpose secret references and
+managed-database recovery evidence remain blockers. See
 [`SECURITY.md`](SECURITY.md).
 
 ## Delivery Profiles
@@ -227,6 +262,7 @@ applied automatically. Read [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) first.
 | 5. Governance | RBAC/API keys, approvals, RLS policies, audit, external-ID reference | Implemented beta |
 | 6. Scale when measured | Transactional outbox, bounded polling, split API/workers | Implemented beta |
 | 6b. Hosted security + UI | OIDC sessions under RLS, member admin, signed webhooks, quotas, dashboard, Gherkin suites | Implemented beta |
+| 6c. Pipeline operations | CloudWatch scheduler and budget, failure classification, recovery workflows, restore drill, SBOM | Implemented beta |
 | 7. Data/AI | Parquet export, backtesting, explainable anomaly detection, optional summaries | Conditional |
 
 See [`docs/LEARNING_GUIDE.es.md`](docs/LEARNING_GUIDE.es.md) for a guided code

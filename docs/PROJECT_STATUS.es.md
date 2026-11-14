@@ -1,6 +1,6 @@
 # Estado Actual Del Proyecto
 
-Fecha del estado: **2026-09-24**.
+Fecha del estado: **2026-10-21**.
 
 ## Resumen Ejecutivo
 
@@ -52,7 +52,9 @@ opt-in y read-only. No se ha creado infraestructura cloud real.
   comentario opcional y audit event por clasificacion o reclasificacion.
 - Reporte semanal UTC por pipeline/detector con cobertura de revision, conteos
   de disposiciones y tasa de falsos positivos sobre true/false positives.
-- Outbox `incident.opened` que puede iniciar un workflow de notificacion.
+- Outbox `incident.opened` e `incident.recovered` que inician los workflows de
+  respuesta y de recuperacion del pipeline con contexto accionable (pipeline,
+  detector, severidad, resumen).
 
 ### Gobernanza
 
@@ -117,13 +119,15 @@ revocado.
   `Idempotency-Key`.
 - No hay renovacion de lease; el timeout maximo del step debe permanecer menor
   que el lease.
-- El check AWS es manual en la beta; no hay scheduler automatico con presupuesto.
+- El scheduler CloudWatch es opt-in (`NIMBUS_AWS_SCHEDULER_ENABLED`); solo se
+  valido con un CloudWatch simulado, no contra una cuenta AWS real.
 - No hay descubrimiento automatico de topologias AWS.
 - RLS se fuerza con roles locales no propietarios para API y worker y contexto
   tenant transaccional. Produccion debe provisionar esos roles antes de migrar.
 - OIDC/JWKS implementado (discovery, allowlist de algoritmos, claim de tenant,
   sesiones efimeras bajo RLS); no hay SCIM ni sincronizacion automatica de grupos.
-- No hay proveedor general de secretos ni firma HMAC de webhooks.
+- No hay proveedor general de secretos. Los webhooks salientes se firman con
+  HMAC-SHA256 (`Nimbus-Signature`, rotacion por multiples secretos activos).
 - Analytics actual es operacional de 24 horas, no un BI historico.
 - El reporte de calidad cubre como maximo 52 semanas hacia atras y no sustituye
   entrevistas, resultados operativos de clientes ni validacion comercial.
@@ -139,7 +143,8 @@ revocado.
 
 - OIDC/JWKS con issuer, audience, algoritmos y cache acotados. (COMPLETADO)
 - Webhooks firmados con rotacion de secreto. (COMPLETADO; la ventana antireplay la aplica el receptor)
-- Cuotas de ingestion y concurrencia por tenant. (COMPLETADO; falta presupuesto de llamadas AWS)
+- Cuotas de ingestion y concurrencia por tenant. (COMPLETADO, incluido presupuesto horario de checks CloudWatch;
+  la cuota de ingestion se serializa por tenant con advisory lock y no se excede con peticiones concurrentes)
 - Secret references en AWS SSM/Secrets Manager.
 
 ### Prioridad 2: Validacion Comercial
@@ -147,20 +152,27 @@ revocado.
 - Entrevistar cinco equipos y operar con tres design partners.
 - Usar el reporte semanal implementado para medir calidad durante pruebas reales
   y acordar umbrales de aceptacion con participantes.
-- Scheduler CloudWatch con presupuesto de llamadas y jitter.
+- Scheduler CloudWatch con presupuesto de llamadas y jitter. (COMPLETADO;
+  ventanas cerradas de cinco minutos, claims en PostgreSQL, alerta
+  `NimbusPipelineChecksNotObserving`)
 - Descubrimiento read-only de event source mappings.
 - Notificaciones Slack o webhook generico como nuevos `Connector`.
 - Dashboard de incidentes y approvals. (COMPLETADO)
 
 ### Prioridad 3: Produccion Y SRE
 
-- RDS, TLS, backups y restore drills.
-- Migraciones como job separado con estrategia expand/contract.
+- RDS, TLS, backups y restore drills. (Restore drill local COMPLETADO:
+  `make restore-drill` verifica checksums y conteos; falta RDS/PITR real y TLS)
+- Migraciones como job separado con estrategia expand/contract. (COMPLETADO;
+  job one-shot, `nimbus verify-schema` para rollbacks, ver `SRE_OPERATIONS.md`)
 - Validar con carga los umbrales iniciales de backlog/outbox y convertirlos en
   SLOs con error budgets basados en evidencia.
-- Pruebas E2E y de aceptacion Gherkin (COMPLETADO, ver `docs/TESTING.md`); falta carga sostenida.
-- SBOM, provenance de release y publicacion por SHA.
-- Runbooks de incidentes, rollback y disaster recovery.
+- Pruebas E2E y de aceptacion Gherkin (COMPLETADO, ver `docs/TESTING.md`: 71 escenarios de
+  aceptacion y 15 journeys Playwright, incluido el enrutamiento de recuperacion); falta carga sostenida.
+- SBOM SPDX del repositorio en CI (COMPLETADO, artifact `sbom` del workflow
+  Security); falta provenance de release y publicacion por SHA.
+- Runbooks de incidentes, rollback y disaster recovery. (COMPLETADO en
+  `SRE_OPERATIONS.md`; DR sin ejercicio en nube real)
 
 ### Fase 7: Data, BI Y AI
 
