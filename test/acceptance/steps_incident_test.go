@@ -47,8 +47,11 @@ func registerIncidentSteps(sc *godog.ScenarioContext, w *world) {
 					return err
 				}
 				summary, _ := notification["summary"].(string)
+				// The source time of the transition, so consumers can order events that arrive late.
+				occurredAt, _ := notification["occurredAt"].(string)
+				at, timeErr := time.Parse(time.RFC3339Nano, occurredAt)
 				if notification["event"] == event && notification["detector"] == detector && notification["pipelineName"] == pipeline &&
-					notification["incidentId"] == w.vars["incidentId"] && summary != "" {
+					notification["incidentId"] == w.vars["incidentId"] && summary != "" && timeErr == nil && !at.After(time.Now()) {
 					return nil
 				}
 			}

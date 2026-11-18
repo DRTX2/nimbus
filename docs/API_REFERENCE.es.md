@@ -305,8 +305,10 @@ curl --fail-with-body "$NIMBUS_URL/v1/pipelines" \
 `incidentWorkflowId` recibe `nimbus.incident.opened` y `recoveryWorkflowId`
 recibe `nimbus.incident.recovered`; ambos son opcionales. Si la version activa
 del workflow escucha otro `eventType`, la API responde `400`. El payload incluye
-`incidentId`, `event`, `pipelineId`, `pipelineName`, `detector`, `severity` y
-`summary`, nunca credenciales ni metricas crudas del cliente.
+`incidentId`, `event`, `pipelineId`, `pipelineName`, `detector`, `severity`,
+`summary` y `occurredAt` (RFC 3339, cuando ocurrio la transicion: `openedAt` o
+`recoveredAt`; los pasos se ejecutan en orden y con reintentos, asi que la hora de
+entrega puede ser posterior), nunca credenciales ni metricas crudas del cliente.
 
 Respuesta `201`:
 

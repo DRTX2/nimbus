@@ -86,17 +86,24 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 // pipeline's opened or recovery workflow with enough context to act on it.
 func (s *Store) dispatchIncidentWorkflow(ctx context.Context, tx pgx.Tx, message OutboxMessage) error {
 	var openedWorkflowID, recoveryWorkflowID, pipelineID, pipelineName, detector, severity, summary string
+	var openedAt time.Time
+	var recoveredAt *time.Time
 	err := tx.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,''),COALESCE(p.recovery_workflow_id::text,''),
-			p.id,p.name,i.detector,i.severity,i.summary
+			p.id,p.name,i.detector,i.severity,i.summary,i.opened_at,i.recovered_at
 		FROM incidents i JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
 		WHERE i.tenant_id=$1 AND i.id=$2`, message.TenantID, message.AggregateID).
-		Scan(&openedWorkflowID, &recoveryWorkflowID, &pipelineID, &pipelineName, &detector, &severity, &summary)
+		Scan(&openedWorkflowID, &recoveryWorkflowID, &pipelineID, &pipelineName, &detector, &severity, &summary, &openedAt, &recoveredAt)
 	if err != nil {
 		return fmt.Errorf("load incident workflow: %w", err)
 	}
-	workflowID := openedWorkflowID
+	// occurredAt is when the transition happened, not when a workflow step delivers it: steps run in
+	// order and retry, so a consumer building a timeline needs the source time.
+	workflowID, occurredAt := openedWorkflowID, openedAt
 	if message.Topic == "incident.recovered" {
 		workflowID = recoveryWorkflowID
+		if recoveredAt != nil {
+			occurredAt = *recoveredAt
+		}
 	}
 	if workflowID == "" {
 		return nil
@@ -108,6 +115,7 @@ func (s *Store) dispatchIncidentWorkflow(ctx context.Context, tx pgx.Tx, message
 	payload, err := json.Marshal(map[string]any{
 		"incidentId": message.AggregateID, "event": strings.TrimPrefix(message.Topic, "incident."), "source": "nimbus",
 		"pipelineId": pipelineID, "pipelineName": pipelineName, "detector": detector, "severity": severity, "summary": summary,
+		"occurredAt": occurredAt.UTC().Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		return fmt.Errorf("encode incident notification: %w", err)
