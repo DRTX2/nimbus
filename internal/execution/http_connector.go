@@ -19,6 +19,7 @@ import (
 
 	"github.com/david/nimbus/internal/store"
 	"github.com/david/nimbus/internal/workflow"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const maxResponseBytes = 64 << 10
@@ -121,6 +122,17 @@ func (c *HTTPConnector) Execute(ctx context.Context, job store.Job) (json.RawMes
 var errBlockedDestination = errors.New("destination resolves only to blocked private or local addresses")
 
 func secureHTTPClient(allowedHosts []string) *http.Client {
+	return &http.Client{
+		// Propagates W3C traceparent so the receiving product continues the incident's trace.
+		Transport: otelhttp.NewTransport(secureTransport(allowedHosts)),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// secureTransport dials only public addresses (or explicitly allowed hosts) and never uses a proxy.
+func secureTransport(allowedHosts []string) *http.Transport {
 	allowed := make(map[string]struct{}, len(allowedHosts))
 	for _, host := range allowedHosts {
 		allowed[strings.ToLower(host)] = struct{}{}
@@ -152,12 +164,7 @@ func secureHTTPClient(allowedHosts []string) *http.Client {
 		}
 		return nil, errBlockedDestination
 	}
-	return &http.Client{
-		Transport: transport,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	return transport
 }
 
 // Non-public ranges beyond the netip predicates: "this network", carrier-grade

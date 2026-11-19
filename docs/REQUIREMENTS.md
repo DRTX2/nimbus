@@ -35,6 +35,8 @@
 | P-03 | Sustained windows | An incident opens only after the configured number of breached windows |
 | P-04 | Incident lifecycle | Active incidents are unique per detector and recover after sustained healthy windows |
 | P-05 | Notification workflow | `incident.opened` and `incident.recovered` outbox records idempotently ingest `nimbus.incident.opened` / `nimbus.incident.recovered` with incident context |
+| P-06 | Escalation | When the mitigation execution fails for good, the incident gets `escalatedAt` once and `nimbus.incident.escalated` (with the reason) is dispatched to the pipeline's escalation workflow |
+| P-07 | Incident tracing | Steps acting on an incident run in a trace whose ID is the incident ID and propagate W3C `traceparent` on outbound HTTP |
 | G-01 | Identity | API keys are hashed, expiring, revocable, returned once, and tenant scoped |
 | G-02 | Authorization | Four roles enforce permissions in every product handler |
 | G-03 | Approval | Requester cannot approve their own protected execution |

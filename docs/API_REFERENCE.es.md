@@ -303,7 +303,12 @@ curl --fail-with-body "$NIMBUS_URL/v1/pipelines" \
 ```
 
 `incidentWorkflowId` recibe `nimbus.incident.opened` y `recoveryWorkflowId`
-recibe `nimbus.incident.recovered`; ambos son opcionales. Si la version activa
+recibe `nimbus.incident.recovered`; ambos son opcionales. `escalationWorkflowId`
+(opcional) recibe `nimbus.incident.escalated` cuando la ejecucion de mitigacion
+(la disparada por `nimbus.incident.opened`) falla definitivamente: el incidente
+queda con `escalatedAt`, la linea de tiempo registra `escalated` (con el paso y el
+error) y el payload incluye `reason`. Se escala una sola vez por incidente y nunca
+si ya se recupero. Ese workflow debe solo notificar: no puede depender de lo que fallo. Si la version activa
 del workflow escucha otro `eventType`, la API responde `400`. El payload incluye
 `incidentId`, `event`, `pipelineId`, `pipelineName`, `detector`, `severity`,
 `summary` y `occurredAt` (RFC 3339, cuando ocurrio la transicion: `openedAt` o

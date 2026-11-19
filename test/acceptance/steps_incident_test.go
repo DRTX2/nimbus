@@ -33,13 +33,16 @@ func registerIncidentSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^a fixture pipeline "([^"]*)" that dispatches the workflow "([^"]*)" on recovery$`, func(ctx context.Context, name, workflow string) error {
 		return w.createPipeline(ctx, name, map[string]any{"recoveryWorkflowId": w.vars["workflow:"+workflow]})
 	})
+	sc.Step(`^a fixture pipeline "([^"]*)" that dispatches the workflow "([^"]*)" and escalates to "([^"]*)"$`, func(ctx context.Context, name, workflow, escalation string) error {
+		return w.createPipeline(ctx, name, map[string]any{"incidentWorkflowId": w.vars["workflow:"+workflow], "escalationWorkflowId": w.vars["workflow:"+escalation]})
+	})
 	sc.Step(`^I try to add a fixture pipeline "([^"]*)" that dispatches the workflow "([^"]*)" on recovery$`, func(ctx context.Context, name, workflow string) error {
 		if err := w.createPipeline(ctx, name, map[string]any{"recoveryWorkflowId": w.vars["workflow:"+workflow]}); err != nil && w.status == http.StatusCreated {
 			return err
 		}
 		return nil
 	})
-	sc.Step(`^the webhook "([^"]*)" should receive an? "(opened|recovered)" notification for "([^"]*)" on pipeline "([^"]*)" within (\d+) seconds$`, func(ctx context.Context, hook, event, detector, pipeline string, seconds int) error {
+	sc.Step(`^the webhook "([^"]*)" should receive an? "(opened|recovered|escalated)" notification for "([^"]*)" on pipeline "([^"]*)" within (\d+) seconds$`, func(ctx context.Context, hook, event, detector, pipeline string, seconds int) error {
 		return eventually(ctx, time.Duration(seconds)*time.Second, func() error {
 			for _, delivery := range w.env.receiver.received(w.hook(hook)) {
 				var notification map[string]any
@@ -107,6 +110,29 @@ func registerIncidentSteps(sc *godog.ScenarioContext, w *world) {
 		return nil
 	})
 	sc.Step(`^the pipeline reports (healthy|stalled|dead-lettering|throttled|retry-storming) metrics for the window starting (\d+) minutes ago$`, w.observe)
+	sc.Step(`^a fixture pipeline "([^"]*)" with (\d+)-second windows$`, func(ctx context.Context, name string, seconds int) error {
+		return w.createPipeline(ctx, name, map[string]any{"windowSeconds": seconds})
+	})
+	sc.Step(`^the pipeline reports (healthy|stalled|dead-lettering|throttled|retry-storming) metrics for the last two (\d+)-second windows$`, func(ctx context.Context, profile string, seconds int) error {
+		window := time.Duration(seconds) * time.Second
+		first := time.Now().UTC().Truncate(window).Add(-2 * window)
+		for _, start := range []time.Time{first, first.Add(window)} {
+			if err := w.observeWindow(ctx, profile, start, window); err != nil {
+				return err
+			}
+			if err := w.expectStatus(http.StatusAccepted); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	sc.Step(`^reporting (healthy|stalled|dead-lettering|throttled|retry-storming) metrics for a (\d+)-second window is rejected$`, func(ctx context.Context, profile string, seconds int) error {
+		window := time.Duration(seconds) * time.Second
+		if err := w.observeWindow(ctx, profile, time.Now().UTC().Truncate(window).Add(-2*window), window); err != nil {
+			return err
+		}
+		return w.expectStatus(http.StatusBadRequest)
+	})
 	sc.Step(`^an? "([^"]*)" incident should be (open|acknowledged|recovered|resolved)$`, func(ctx context.Context, detector, status string) error {
 		if err := w.request(ctx, http.MethodGet, "/v1/incidents", nil, nil); err != nil {
 			return err
@@ -224,6 +250,14 @@ func (w *world) createAWSPipeline(ctx context.Context, name string, windows int)
 		"mode": "aws", "roleArn": "arn:aws:iam::123456789012:role/nimbus-read",
 		"externalIdRef": "aws-external-id/acceptance-unconfigured", "consecutiveWindows": windows,
 	})
+}
+
+func (w *world) observeWindow(ctx context.Context, profile string, start time.Time, window time.Duration) error {
+	body := map[string]any{"windowStartedAt": start, "windowEndedAt": start.Add(window)}
+	for key, value := range metricProfiles[profile] {
+		body[key] = value
+	}
+	return w.request(ctx, http.MethodPost, "/v1/pipelines/"+w.vars["pipelineId"]+"/observations", body, nil)
 }
 
 func (w *world) observe(ctx context.Context, profile string, minutesAgo int) error {

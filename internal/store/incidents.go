@@ -16,11 +16,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const detectorWindowDuration = 5 * time.Minute
-
 var pipelineExternalIDRefPattern = regexp.MustCompile(`^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$`)
 
 func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pipeline) (Pipeline, error) {
+	if pipeline.WindowSeconds == 0 {
+		pipeline.WindowSeconds = 300
+	}
 	if err := validatePipeline(pipeline); err != nil {
 		return Pipeline{}, err
 	}
@@ -41,16 +42,19 @@ func (s *Store) CreatePipeline(ctx context.Context, actor Principal, pipeline Pi
 	if err := requireWorkflowTrigger(ctx, tx, actor.TenantID, pipeline.IncidentWorkflowID, "nimbus.incident.opened"); err != nil {
 		return Pipeline{}, err
 	}
+	if err := requireWorkflowTrigger(ctx, tx, actor.TenantID, pipeline.EscalationWorkflowID, "nimbus.incident.escalated"); err != nil {
+		return Pipeline{}, err
+	}
 	if err := requireWorkflowTrigger(ctx, tx, actor.TenantID, pipeline.RecoveryWorkflowID, "nimbus.incident.recovered"); err != nil {
 		return Pipeline{}, err
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO monitored_pipelines (tenant_id, name, mode, region, queue_arn, lambda_arn, dlq_arn, role_arn, external_id_ref,
-			incident_workflow_id, recovery_workflow_id, consecutive_windows, backlog_threshold, age_threshold_seconds)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,$14)
+			incident_workflow_id, recovery_workflow_id, escalation_workflow_id, consecutive_windows, backlog_threshold, age_threshold_seconds, window_seconds)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,$13,$14,$15,$16)
 		RETURNING id, status, created_at`, actor.TenantID, pipeline.Name, pipeline.Mode, pipeline.Region,
-		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDRef, pipeline.IncidentWorkflowID, pipeline.RecoveryWorkflowID,
-		pipeline.ConsecutiveWindows, pipeline.BacklogThreshold, pipeline.AgeThresholdSeconds).
+		pipeline.QueueARN, pipeline.LambdaARN, pipeline.DLQARN, pipeline.RoleARN, pipeline.ExternalIDRef, pipeline.IncidentWorkflowID, pipeline.RecoveryWorkflowID, pipeline.EscalationWorkflowID,
+		pipeline.ConsecutiveWindows, pipeline.BacklogThreshold, pipeline.AgeThresholdSeconds, pipeline.WindowSeconds).
 		Scan(&pipeline.ID, &pipeline.Status, &pipeline.CreatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && (pgErr.Code == "23503" || pgErr.Code == "23505") {
@@ -84,6 +88,13 @@ func validatePipeline(pipeline Pipeline) error {
 	if pipeline.Mode == "fixture" && (pipeline.RoleARN != "" || pipeline.ExternalIDRef != "") {
 		return fmt.Errorf("%w: fixture pipelines cannot configure AWS credentials", ErrInvalidInput)
 	}
+	if pipeline.WindowSeconds != 0 && pipeline.WindowSeconds != 30 && pipeline.WindowSeconds != 60 && pipeline.WindowSeconds != 300 {
+		return fmt.Errorf("%w: windowSeconds must be 30, 60 or 300", ErrInvalidInput)
+	}
+	// CloudWatch metrics are read in 5-minute periods; shorter windows only make sense for pushed observations.
+	if pipeline.Mode == "aws" && pipeline.WindowSeconds != 0 && pipeline.WindowSeconds != 300 {
+		return fmt.Errorf("%w: AWS pipelines use 300-second windows", ErrInvalidInput)
+	}
 	return nil
 }
 
@@ -94,8 +105,8 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),COALESCE(incident_workflow_id::text,''),COALESCE(recovery_workflow_id::text,''),
-			status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
+		SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),COALESCE(incident_workflow_id::text,''),COALESCE(recovery_workflow_id::text,''),COALESCE(escalation_workflow_id::text,''),
+			status,consecutive_windows,backlog_threshold,age_threshold_seconds,window_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list pipelines: %w", err)
@@ -105,7 +116,7 @@ func (s *Store) ListPipelines(ctx context.Context, tenantID string) ([]Pipeline,
 	for rows.Next() {
 		var item Pipeline
 		if err := rows.Scan(&item.ID, &item.Name, &item.Mode, &item.Region, &item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef,
-			&item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.Status, &item.ConsecutiveWindows, &item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt); err != nil {
+			&item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.EscalationWorkflowID, &item.Status, &item.ConsecutiveWindows, &item.BacklogThreshold, &item.AgeThresholdSeconds, &item.WindowSeconds, &item.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan pipeline: %w", err)
 		}
 		result = append(result, item)
@@ -127,10 +138,10 @@ func (s *Store) GetPipeline(ctx context.Context, tenantID, id string) (Pipeline,
 	defer func() { _ = tx.Rollback(ctx) }()
 	var item Pipeline
 	err = tx.QueryRow(ctx, `SELECT id,name,mode,region,queue_arn,lambda_arn,dlq_arn,COALESCE(role_arn,''),COALESCE(external_id_ref,''),
-		COALESCE(incident_workflow_id::text,''),COALESCE(recovery_workflow_id::text,''),status,consecutive_windows,backlog_threshold,age_threshold_seconds,created_at
+		COALESCE(incident_workflow_id::text,''),COALESCE(recovery_workflow_id::text,''),COALESCE(escalation_workflow_id::text,''),status,consecutive_windows,backlog_threshold,age_threshold_seconds,window_seconds,created_at
 		FROM monitored_pipelines WHERE tenant_id=$1 AND id=$2`, tenantID, id).Scan(&item.ID, &item.Name, &item.Mode, &item.Region,
-		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.Status, &item.ConsecutiveWindows,
-		&item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt)
+		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.EscalationWorkflowID, &item.Status, &item.ConsecutiveWindows,
+		&item.BacklogThreshold, &item.AgeThresholdSeconds, &item.WindowSeconds, &item.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Pipeline{}, ErrNotFound
 	}
@@ -151,9 +162,9 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 	defer func() { _ = tx.Rollback(ctx) }()
 	var pipeline Pipeline
 	err = tx.QueryRow(ctx, `
-		SELECT id, mode, status, consecutive_windows, backlog_threshold, age_threshold_seconds
+		SELECT id, mode, status, consecutive_windows, backlog_threshold, age_threshold_seconds, window_seconds
 		FROM monitored_pipelines WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, actor.TenantID, observation.PipelineID).
-		Scan(&pipeline.ID, &pipeline.Mode, &pipeline.Status, &pipeline.ConsecutiveWindows, &pipeline.BacklogThreshold, &pipeline.AgeThresholdSeconds)
+		Scan(&pipeline.ID, &pipeline.Mode, &pipeline.Status, &pipeline.ConsecutiveWindows, &pipeline.BacklogThreshold, &pipeline.AgeThresholdSeconds, &pipeline.WindowSeconds)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -162,6 +173,10 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 	}
 	if pipeline.Mode != "fixture" && observation.Source == "fixture" {
 		return nil, ErrForbidden
+	}
+	window := time.Duration(pipeline.WindowSeconds) * time.Second
+	if err := validateWindowShape(observation.WindowStartedAt, observation.WindowEndedAt, window); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	err = tx.QueryRow(ctx, `WITH inserted AS (
 		INSERT INTO pipeline_observations (tenant_id,pipeline_id,window_started_at,window_ended_at,visible_messages,
@@ -198,7 +213,7 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 		windows = append(windows, item)
 	}
 	rows.Close()
-	if len(windows) < pipeline.ConsecutiveWindows || !contiguousDetectorWindows(windows) {
+	if len(windows) < pipeline.ConsecutiveWindows || !contiguousDetectorWindows(windows, window) {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit observation: %w", err)
 		}
@@ -231,10 +246,10 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 				VALUES ($1,$2,$3,$4,$5,$6,$7)
 				ON CONFLICT (tenant_id,pipeline_id,detector) WHERE status IN ('open','acknowledged')
 				DO UPDATE SET evidence=EXCLUDED.evidence,updated_at=now()
-				RETURNING id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,recovered_at,resolved_at`,
+				RETURNING id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,escalated_at,recovered_at,resolved_at`,
 				actor.TenantID, observation.PipelineID, name, fingerprint, decision.Severity, decision.Summary, evidence).
 				Scan(&incident.ID, &incident.PipelineID, &incident.Detector, &incident.Status, &incident.Severity, &incident.Summary, &incident.Evidence,
-					&incident.OpenedAt, &incident.AcknowledgedAt, &incident.RecoveredAt, &incident.ResolvedAt)
+					&incident.OpenedAt, &incident.AcknowledgedAt, &incident.EscalatedAt, &incident.RecoveredAt, &incident.ResolvedAt)
 			if err != nil {
 				return nil, fmt.Errorf("open incident: %w", err)
 			}
@@ -272,7 +287,7 @@ func (s *Store) RecordObservation(ctx context.Context, actor Principal, observat
 func recoverIncidents(ctx context.Context, tx pgx.Tx, actor Principal, pipelineID, detectorName string) ([]Incident, error) {
 	rows, err := tx.Query(ctx, `UPDATE incidents SET status='recovered',recovered_at=now(),updated_at=now()
 		WHERE tenant_id=$1 AND pipeline_id=$2 AND detector=$3 AND status IN ('open','acknowledged')
-		RETURNING id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,recovered_at,resolved_at`,
+		RETURNING id,pipeline_id,detector,status,severity,summary,evidence,opened_at,acknowledged_at,escalated_at,recovered_at,resolved_at`,
 		actor.TenantID, pipelineID, detectorName)
 	if err != nil {
 		return nil, fmt.Errorf("recover incident: %w", err)
@@ -281,7 +296,7 @@ func recoverIncidents(ctx context.Context, tx pgx.Tx, actor Principal, pipelineI
 	for rows.Next() {
 		var incident Incident
 		if err := rows.Scan(&incident.ID, &incident.PipelineID, &incident.Detector, &incident.Status, &incident.Severity, &incident.Summary,
-			&incident.Evidence, &incident.OpenedAt, &incident.AcknowledgedAt, &incident.RecoveredAt, &incident.ResolvedAt); err != nil {
+			&incident.Evidence, &incident.OpenedAt, &incident.AcknowledgedAt, &incident.EscalatedAt, &incident.RecoveredAt, &incident.ResolvedAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan recovered incident: %w", err)
 		}
@@ -304,15 +319,25 @@ func recoverIncidents(ctx context.Context, tx pgx.Tx, actor Principal, pipelineI
 	return recovered, nil
 }
 
+// validateWindowShape requires an observation to cover exactly one pipeline window on its UTC boundary.
+func validateWindowShape(start, end time.Time, window time.Duration) error {
+	if end.Sub(start) != window {
+		return fmt.Errorf("observation window must be exactly %d seconds for this pipeline", int(window.Seconds()))
+	}
+	if !start.UTC().Equal(start.UTC().Truncate(window)) {
+		return fmt.Errorf("windowStartedAt must use a %d-second UTC boundary", int(window.Seconds()))
+	}
+	return nil
+}
+
 // Windows are ordered newest first. Exact UTC boundaries prevent overlapping
 // checks or old, separated samples from being interpreted as a sustained fault.
-func contiguousDetectorWindows(windows []Observation) bool {
+func contiguousDetectorWindows(windows []Observation, duration time.Duration) bool {
 	if len(windows) == 0 {
 		return false
 	}
 	for index, window := range windows {
-		if window.WindowEndedAt.Sub(window.WindowStartedAt) != detectorWindowDuration ||
-			!window.WindowStartedAt.Equal(window.WindowStartedAt.UTC().Truncate(detectorWindowDuration)) {
+		if validateWindowShape(window.WindowStartedAt, window.WindowEndedAt, duration) != nil {
 			return false
 		}
 		if index > 0 && !windows[index-1].WindowStartedAt.Equal(window.WindowEndedAt) {
@@ -323,7 +348,7 @@ func contiguousDetectorWindows(windows []Observation) bool {
 }
 
 const incidentColumns = `i.id,i.pipeline_id,p.name,i.detector,i.status,i.severity,i.summary,i.evidence,i.opened_at,
-	i.acknowledged_at,i.recovered_at,i.resolved_at,r.id,r.disposition,r.reviewer_principal_id,r.comment,r.reviewed_at
+	i.acknowledged_at,i.escalated_at,i.recovered_at,i.resolved_at,r.id,r.disposition,r.reviewer_principal_id,r.comment,r.reviewed_at
 	FROM incidents i
 	JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
 	LEFT JOIN LATERAL (
@@ -339,7 +364,7 @@ func scanIncident(row pgx.Row) (Incident, error) {
 	var comment *string
 	var reviewedAt *time.Time
 	if err := row.Scan(&item.ID, &item.PipelineID, &item.PipelineName, &item.Detector, &item.Status, &item.Severity, &item.Summary, &item.Evidence,
-		&item.OpenedAt, &item.AcknowledgedAt, &item.RecoveredAt, &item.ResolvedAt, &reviewID, &disposition, &reviewerID, &comment, &reviewedAt); err != nil {
+		&item.OpenedAt, &item.AcknowledgedAt, &item.EscalatedAt, &item.RecoveredAt, &item.ResolvedAt, &reviewID, &disposition, &reviewerID, &comment, &reviewedAt); err != nil {
 		return Incident{}, err
 	}
 	if reviewID != nil {

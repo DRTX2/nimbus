@@ -2,8 +2,11 @@ package observability
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -13,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Metrics struct {
@@ -106,9 +110,46 @@ func SetupTracing(ctx context.Context, endpoint string) (func(context.Context) e
 		return nil, fmt.Errorf("create trace resource: %w", err)
 	}
 	provider := tracesdk.NewTracerProvider(
+		tracesdk.WithIDGenerator(idGenerator{}),
 		tracesdk.WithBatcher(exporter),
 		tracesdk.WithResource(serviceResource),
 	)
 	otel.SetTracerProvider(provider)
 	return provider.Shutdown, nil
+}
+
+type traceIDKey struct{}
+
+// WithIncidentTrace makes root spans started from the returned context use the incident's UUID as
+// their trace ID. Every product that handles the incident propagates W3C traceparent, so everything
+// done about one incident (kill switch, notifications, restore, escalation) lands in one trace whose
+// ID anyone can derive from the incident ID. Returns ctx unchanged if id is not a UUID.
+func WithIncidentTrace(ctx context.Context, id string) context.Context {
+	raw, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
+	if err != nil || len(raw) != 16 {
+		return ctx
+	}
+	var traceID trace.TraceID
+	copy(traceID[:], raw)
+	if !traceID.IsValid() {
+		return ctx
+	}
+	return context.WithValue(ctx, traceIDKey{}, traceID)
+}
+
+// idGenerator is random like the SDK default, except for the trace ID pinned by WithIncidentTrace.
+type idGenerator struct{}
+
+func (idGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
+	traceID, ok := ctx.Value(traceIDKey{}).(trace.TraceID)
+	if !ok {
+		_, _ = rand.Read(traceID[:])
+	}
+	return traceID, idGenerator{}.NewSpanID(ctx, traceID)
+}
+
+func (idGenerator) NewSpanID(context.Context, trace.TraceID) trace.SpanID {
+	var spanID trace.SpanID
+	_, _ = rand.Read(spanID[:])
+	return spanID
 }

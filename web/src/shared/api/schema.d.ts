@@ -576,6 +576,11 @@ export interface components {
             /** Format: int64 */
             consecutiveWindows?: number;
             dlqArn: string;
+            /**
+             * Format: uuid
+             * @description Workflow triggered by nimbus.incident.escalated when the incident's mitigation workflow fails for good.
+             */
+            escalationWorkflowId?: string;
             externalIdRef?: string;
             /**
              * Format: uuid
@@ -594,6 +599,12 @@ export interface components {
             recoveryWorkflowId?: string;
             region: string;
             roleArn?: string;
+            /**
+             * Format: int64
+             * @description Observation window. 300 (default) matches CloudWatch periods and is required for AWS pipelines; push agents may use 30 or 60.
+             * @enum {integer}
+             */
+            windowSeconds?: 30 | 60 | 300;
         };
         CreateWorkflowInputBody: {
             /**
@@ -784,6 +795,8 @@ export interface components {
             /** Format: date-time */
             acknowledgedAt?: string;
             detector: string;
+            /** Format: date-time */
+            escalatedAt?: string;
             evidence: unknown;
             id: string;
             /** Format: date-time */
@@ -939,6 +952,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             dlqArn: string;
+            escalationWorkflowId?: string;
             externalIdRef?: string;
             id: string;
             incidentWorkflowId?: string;
@@ -950,6 +964,8 @@ export interface components {
             region: string;
             roleArn?: string;
             status: string;
+            /** Format: int64 */
+            windowSeconds: number;
         };
         PipelinesOutputBody: {
             /**

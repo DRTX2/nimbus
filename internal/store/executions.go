@@ -335,10 +335,16 @@ func (s *Store) FailStep(ctx context.Context, job Job, message string, retryAt *
 		if command.RowsAffected() != 1 {
 			return errors.New("step lease was lost before failure")
 		}
-		if _, err := tx.Exec(ctx, `
+		failed, err := tx.Exec(ctx, `
 			UPDATE executions SET status = 'failed', error = $1, finished_at = now()
-			WHERE tenant_id = $2 AND id = $3 AND status IN ('queued', 'running')`, message, job.TenantID, job.ExecutionID); err != nil {
+			WHERE tenant_id = $2 AND id = $3 AND status IN ('queued', 'running')`, message, job.TenantID, job.ExecutionID)
+		if err != nil {
 			return fmt.Errorf("fail execution: %w", err)
+		}
+		if failed.RowsAffected() == 1 {
+			if err := escalateFailedMitigation(ctx, tx, job, message); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE step_runs SET status = 'cancelled', error = 'cancelled because another step failed', finished_at = now()
@@ -379,4 +385,38 @@ func (s *Store) Analytics(ctx context.Context, tenantID string) (Analytics, erro
 		result.SuccessRate = float64(result.Succeeded24h) / float64(finished)
 	}
 	return result, nil
+}
+
+// escalateFailedMitigation runs in the transaction that fails an execution. If that execution was an
+// incident's mitigation (triggered by nimbus.incident.opened) and the incident is still active, the
+// incident is marked escalated and incident.escalated is queued, at most once per incident. Mitigation
+// failing is itself the signal a human needs: the cancelled steps included the notification.
+func escalateFailedMitigation(ctx context.Context, tx pgx.Tx, job Job, reason string) error {
+	var incidentID string
+	err := tx.QueryRow(ctx, `SELECT COALESCE(e.payload->>'incidentId','') FROM executions x
+		JOIN events e ON e.tenant_id = x.tenant_id AND e.id = x.event_id
+		WHERE x.tenant_id = $1 AND x.id = $2 AND e.event_type = 'nimbus.incident.opened'`, job.TenantID, job.ExecutionID).Scan(&incidentID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && incidentID == "") {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load mitigated incident: %w", err)
+	}
+	escalated, err := tx.Exec(ctx, `UPDATE incidents SET escalated_at = now(), updated_at = now()
+		WHERE tenant_id = $1 AND id = $2 AND escalated_at IS NULL AND status IN ('open', 'acknowledged')`, job.TenantID, incidentID)
+	if err != nil {
+		return fmt.Errorf("escalate incident: %w", err)
+	}
+	if escalated.RowsAffected() != 1 {
+		return nil
+	}
+	details := map[string]any{"executionId": job.ExecutionID, "stepId": job.StepID, "reason": reason}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("encode escalation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO incident_timeline (tenant_id,incident_id,event_type,details) VALUES ($1,$2,'escalated',$3)`, job.TenantID, incidentID, encoded); err != nil {
+		return fmt.Errorf("record escalation: %w", err)
+	}
+	return insertOutbox(ctx, tx, job.TenantID, "incident.escalated", "incident", incidentID, "incident:"+incidentID+":escalated", details)
 }

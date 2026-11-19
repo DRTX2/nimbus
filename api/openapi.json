@@ -333,6 +333,11 @@
             "maxLength": 512,
             "type": "string"
           },
+          "escalationWorkflowId": {
+            "description": "Workflow triggered by nimbus.incident.escalated when the incident's mitigation workflow fails for good.",
+            "format": "uuid",
+            "type": "string"
+          },
           "externalIdRef": {
             "maxLength": 80,
             "pattern": "^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$",
@@ -376,6 +381,16 @@
           "roleArn": {
             "maxLength": 512,
             "type": "string"
+          },
+          "windowSeconds": {
+            "description": "Observation window. 300 (default) matches CloudWatch periods and is required for AWS pipelines; push agents may use 30 or 60.",
+            "enum": [
+              30,
+              60,
+              300
+            ],
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
@@ -841,6 +856,10 @@
           "detector": {
             "type": "string"
           },
+          "escalatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
           "evidence": {},
           "id": {
             "type": "string"
@@ -1270,6 +1289,9 @@
           "dlqArn": {
             "type": "string"
           },
+          "escalationWorkflowId": {
+            "type": "string"
+          },
           "externalIdRef": {
             "type": "string"
           },
@@ -1302,6 +1324,10 @@
           },
           "status": {
             "type": "string"
+          },
+          "windowSeconds": {
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
@@ -1316,6 +1342,7 @@
           "consecutiveWindows",
           "backlogThreshold",
           "ageThresholdSeconds",
+          "windowSeconds",
           "createdAt"
         ],
         "type": "object"

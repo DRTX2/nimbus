@@ -80,22 +80,24 @@ type Approval struct {
 }
 
 type Pipeline struct {
-	ID                  string    `json:"id"`
-	Name                string    `json:"name"`
-	Mode                string    `json:"mode"`
-	Region              string    `json:"region"`
-	QueueARN            string    `json:"queueArn"`
-	LambdaARN           string    `json:"lambdaArn"`
-	DLQARN              string    `json:"dlqArn"`
-	RoleARN             string    `json:"roleArn,omitempty"`
-	ExternalIDRef       string    `json:"externalIdRef,omitempty"`
-	IncidentWorkflowID  string    `json:"incidentWorkflowId,omitempty"`
-	RecoveryWorkflowID  string    `json:"recoveryWorkflowId,omitempty"`
-	Status              string    `json:"status"`
-	ConsecutiveWindows  int       `json:"consecutiveWindows"`
-	BacklogThreshold    int64     `json:"backlogThreshold"`
-	AgeThresholdSeconds int64     `json:"ageThresholdSeconds"`
-	CreatedAt           time.Time `json:"createdAt"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Mode                 string    `json:"mode"`
+	Region               string    `json:"region"`
+	QueueARN             string    `json:"queueArn"`
+	LambdaARN            string    `json:"lambdaArn"`
+	DLQARN               string    `json:"dlqArn"`
+	RoleARN              string    `json:"roleArn,omitempty"`
+	ExternalIDRef        string    `json:"externalIdRef,omitempty"`
+	IncidentWorkflowID   string    `json:"incidentWorkflowId,omitempty"`
+	RecoveryWorkflowID   string    `json:"recoveryWorkflowId,omitempty"`
+	EscalationWorkflowID string    `json:"escalationWorkflowId,omitempty"`
+	Status               string    `json:"status"`
+	ConsecutiveWindows   int       `json:"consecutiveWindows"`
+	BacklogThreshold     int64     `json:"backlogThreshold"`
+	AgeThresholdSeconds  int64     `json:"ageThresholdSeconds"`
+	WindowSeconds        int       `json:"windowSeconds"`
+	CreatedAt            time.Time `json:"createdAt"`
 }
 
 type Observation struct {
@@ -124,6 +126,7 @@ type Incident struct {
 	Evidence       json.RawMessage `json:"evidence"`
 	OpenedAt       time.Time       `json:"openedAt"`
 	AcknowledgedAt *time.Time      `json:"acknowledgedAt,omitempty"`
+	EscalatedAt    *time.Time      `json:"escalatedAt,omitempty"`
 	RecoveredAt    *time.Time      `json:"recoveredAt,omitempty"`
 	ResolvedAt     *time.Time      `json:"resolvedAt,omitempty"`
 	Review         *IncidentReview `json:"review,omitempty"`

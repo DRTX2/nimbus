@@ -35,19 +35,21 @@ func (a *API) registerIncidents(api huma.API) {
 
 type createPipelineInput struct {
 	Body struct {
-		Name                string `json:"name" minLength:"1" maxLength:"120"`
-		Mode                string `json:"mode" enum:"fixture,aws"`
-		Region              string `json:"region" minLength:"3" maxLength:"32"`
-		QueueARN            string `json:"queueArn" maxLength:"512"`
-		LambdaARN           string `json:"lambdaArn" maxLength:"512"`
-		DLQARN              string `json:"dlqArn" maxLength:"512"`
-		RoleARN             string `json:"roleArn,omitempty" maxLength:"512"`
-		ExternalIDRef       string `json:"externalIdRef,omitempty" maxLength:"80" pattern:"^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$"`
-		IncidentWorkflowID  string `json:"incidentWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.opened."`
-		RecoveryWorkflowID  string `json:"recoveryWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.recovered."`
-		ConsecutiveWindows  int    `json:"consecutiveWindows,omitempty" minimum:"1" maximum:"10"`
-		BacklogThreshold    int64  `json:"backlogThreshold,omitempty" minimum:"1"`
-		AgeThresholdSeconds int64  `json:"ageThresholdSeconds,omitempty" minimum:"1"`
+		Name                 string `json:"name" minLength:"1" maxLength:"120"`
+		Mode                 string `json:"mode" enum:"fixture,aws"`
+		Region               string `json:"region" minLength:"3" maxLength:"32"`
+		QueueARN             string `json:"queueArn" maxLength:"512"`
+		LambdaARN            string `json:"lambdaArn" maxLength:"512"`
+		DLQARN               string `json:"dlqArn" maxLength:"512"`
+		RoleARN              string `json:"roleArn,omitempty" maxLength:"512"`
+		ExternalIDRef        string `json:"externalIdRef,omitempty" maxLength:"80" pattern:"^aws-external-id/[a-z0-9][a-z0-9._-]{0,63}$"`
+		IncidentWorkflowID   string `json:"incidentWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.opened."`
+		RecoveryWorkflowID   string `json:"recoveryWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.recovered."`
+		EscalationWorkflowID string `json:"escalationWorkflowId,omitempty" format:"uuid" doc:"Workflow triggered by nimbus.incident.escalated when the incident's mitigation workflow fails for good."`
+		ConsecutiveWindows   int    `json:"consecutiveWindows,omitempty" minimum:"1" maximum:"10"`
+		BacklogThreshold     int64  `json:"backlogThreshold,omitempty" minimum:"1"`
+		AgeThresholdSeconds  int64  `json:"ageThresholdSeconds,omitempty" minimum:"1"`
+		WindowSeconds        int    `json:"windowSeconds,omitempty" enum:"30,60,300" doc:"Observation window. 300 (default) matches CloudWatch periods and is required for AWS pipelines; push agents may use 30 or 60."`
 	}
 }
 type pipelineOutput struct{ Body store.Pipeline }
@@ -57,7 +59,7 @@ func (a *API) createPipeline(ctx context.Context, input *createPipelineInput) (*
 	if err != nil {
 		return nil, err
 	}
-	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDRef: input.Body.ExternalIDRef, IncidentWorkflowID: input.Body.IncidentWorkflowID, RecoveryWorkflowID: input.Body.RecoveryWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds}
+	pipeline := store.Pipeline{Name: strings.TrimSpace(input.Body.Name), Mode: input.Body.Mode, Region: input.Body.Region, QueueARN: input.Body.QueueARN, LambdaARN: input.Body.LambdaARN, DLQARN: input.Body.DLQARN, RoleARN: input.Body.RoleARN, ExternalIDRef: input.Body.ExternalIDRef, IncidentWorkflowID: input.Body.IncidentWorkflowID, RecoveryWorkflowID: input.Body.RecoveryWorkflowID, EscalationWorkflowID: input.Body.EscalationWorkflowID, ConsecutiveWindows: input.Body.ConsecutiveWindows, BacklogThreshold: input.Body.BacklogThreshold, AgeThresholdSeconds: input.Body.AgeThresholdSeconds, WindowSeconds: input.Body.WindowSeconds}
 	result, err := a.store.CreatePipeline(ctx, actor, pipeline)
 	if errors.Is(err, store.ErrInvalidInput) {
 		return nil, huma.Error400BadRequest(err.Error())
@@ -177,6 +179,9 @@ func (a *API) recordObservation(ctx context.Context, input *observationInput) (*
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, huma.Error404NotFound("pipeline was not found")
 	}
+	if errors.Is(err, store.ErrInvalidInput) {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
 	if errors.Is(err, store.ErrForbidden) {
 		return nil, huma.Error403Forbidden("fixture observations are disabled for AWS pipelines")
 	}
@@ -188,13 +193,11 @@ func (a *API) recordObservation(ctx context.Context, input *observationInput) (*
 	return out, nil
 }
 
+// Window length and boundary depend on the pipeline (windowSeconds) and are checked by the store.
 func validateObservationWindow(start, end, now time.Time) error {
 	start, end = start.UTC(), end.UTC()
-	if end.Sub(start) != 5*time.Minute {
-		return errors.New("observation window must be exactly five minutes")
-	}
-	if !start.Equal(start.Truncate(5 * time.Minute)) {
-		return errors.New("windowStartedAt must use a five-minute UTC boundary")
+	if !end.After(start) {
+		return errors.New("windowEndedAt must be after windowStartedAt")
 	}
 	if end.After(now.Add(time.Minute)) {
 		return errors.New("observation window cannot be in the future")

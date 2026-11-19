@@ -60,11 +60,7 @@ func TestForbiddenIP(t *testing.T) {
 func TestSecureHTTPClientIgnoresEnvironmentProxies(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://proxy.example:8080")
 	t.Setenv("HTTP_PROXY", "http://proxy.example:8080")
-	client := secureHTTPClient(nil)
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport type = %T", client.Transport)
-	}
+	transport := secureTransport(nil)
 	if transport.Proxy != nil {
 		request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 		if err != nil {

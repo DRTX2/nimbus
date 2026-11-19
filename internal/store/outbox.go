@@ -63,7 +63,7 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 		return fmt.Errorf("begin outbox publish: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if message.Topic == "incident.opened" || message.Topic == "incident.recovered" {
+	if message.Topic == "incident.opened" || message.Topic == "incident.recovered" || message.Topic == "incident.escalated" {
 		if err := s.dispatchIncidentWorkflow(ctx, tx, message); err != nil {
 			return err
 		}
@@ -85,24 +85,30 @@ func (s *Store) PublishOutbox(ctx context.Context, message OutboxMessage) error 
 // dispatchIncidentWorkflow ingests an incident lifecycle event into the
 // pipeline's opened or recovery workflow with enough context to act on it.
 func (s *Store) dispatchIncidentWorkflow(ctx context.Context, tx pgx.Tx, message OutboxMessage) error {
-	var openedWorkflowID, recoveryWorkflowID, pipelineID, pipelineName, detector, severity, summary string
+	var openedWorkflowID, recoveryWorkflowID, escalationWorkflowID, pipelineID, pipelineName, detector, severity, summary string
 	var openedAt time.Time
-	var recoveredAt *time.Time
-	err := tx.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,''),COALESCE(p.recovery_workflow_id::text,''),
-			p.id,p.name,i.detector,i.severity,i.summary,i.opened_at,i.recovered_at
+	var recoveredAt, escalatedAt *time.Time
+	err := tx.QueryRow(ctx, `SELECT COALESCE(p.incident_workflow_id::text,''),COALESCE(p.recovery_workflow_id::text,''),COALESCE(p.escalation_workflow_id::text,''),
+			p.id,p.name,i.detector,i.severity,i.summary,i.opened_at,i.recovered_at,i.escalated_at
 		FROM incidents i JOIN monitored_pipelines p ON p.tenant_id=i.tenant_id AND p.id=i.pipeline_id
 		WHERE i.tenant_id=$1 AND i.id=$2`, message.TenantID, message.AggregateID).
-		Scan(&openedWorkflowID, &recoveryWorkflowID, &pipelineID, &pipelineName, &detector, &severity, &summary, &openedAt, &recoveredAt)
+		Scan(&openedWorkflowID, &recoveryWorkflowID, &escalationWorkflowID, &pipelineID, &pipelineName, &detector, &severity, &summary, &openedAt, &recoveredAt, &escalatedAt)
 	if err != nil {
 		return fmt.Errorf("load incident workflow: %w", err)
 	}
 	// occurredAt is when the transition happened, not when a workflow step delivers it: steps run in
 	// order and retry, so a consumer building a timeline needs the source time.
 	workflowID, occurredAt := openedWorkflowID, openedAt
-	if message.Topic == "incident.recovered" {
+	switch message.Topic {
+	case "incident.recovered":
 		workflowID = recoveryWorkflowID
 		if recoveredAt != nil {
 			occurredAt = *recoveredAt
+		}
+	case "incident.escalated":
+		workflowID = escalationWorkflowID
+		if escalatedAt != nil {
+			occurredAt = *escalatedAt
 		}
 	}
 	if workflowID == "" {
@@ -112,11 +118,18 @@ func (s *Store) dispatchIncidentWorkflow(ctx context.Context, tx pgx.Tx, message
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(map[string]any{
+	body := map[string]any{
 		"incidentId": message.AggregateID, "event": strings.TrimPrefix(message.Topic, "incident."), "source": "nimbus",
 		"pipelineId": pipelineID, "pipelineName": pipelineName, "detector": detector, "severity": severity, "summary": summary,
 		"occurredAt": occurredAt.UTC().Format(time.RFC3339Nano),
-	})
+	}
+	if message.Topic == "incident.escalated" {
+		var reason map[string]any
+		if err := json.Unmarshal(message.Payload, &reason); err == nil {
+			body["reason"] = reason["reason"]
+		}
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encode incident notification: %w", err)
 	}

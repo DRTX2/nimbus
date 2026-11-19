@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/david/nimbus/internal/platform/observability"
 	"github.com/david/nimbus/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // WorkerConfig bounds worker concurrency and lease behavior.
@@ -79,8 +84,15 @@ func (w *Worker) runOne(ctx context.Context, owner string) (bool, error) {
 		return false, err
 	}
 	started := time.Now()
-	stepCtx, cancel := context.WithTimeout(ctx, time.Duration(job.TimeoutSeconds)*time.Second)
+	stepCtx, cancel := context.WithTimeout(stepTraceContext(ctx, job), time.Duration(job.TimeoutSeconds)*time.Second)
+	stepCtx, span := tracer.Start(stepCtx, "nimbus.step "+job.StepID, oteltrace.WithAttributes(
+		attribute.String("nimbus.execution_id", job.ExecutionID), attribute.String("nimbus.step_type", job.StepType),
+		attribute.Int("nimbus.attempt", job.Attempt), attribute.Int("nimbus.max_attempts", job.MaxAttempts)))
 	output, err := w.connectors.execute(stepCtx, job)
+	if err != nil {
+		span.SetStatus(codes.Error, safeError(err))
+	}
+	span.End()
 	cancel()
 	w.metrics.StepDuration.WithLabelValues(job.StepType).Observe(time.Since(started).Seconds())
 	// Persist the outcome even during shutdown so a finished effect is not re-run.
@@ -136,4 +148,17 @@ func safeError(err error) string {
 		return message[:500]
 	}
 	return message
+}
+
+var tracer = otel.Tracer("github.com/david/nimbus/internal/execution")
+
+// stepTraceContext puts a step that acts on an incident into the incident's trace (trace ID = incident ID).
+func stepTraceContext(ctx context.Context, job store.Job) context.Context {
+	var event struct {
+		IncidentID string `json:"incidentId"`
+	}
+	if json.Unmarshal(job.EventPayload, &event) != nil || event.IncidentID == "" {
+		return ctx
+	}
+	return observability.WithIncidentTrace(ctx, event.IncidentID)
 }

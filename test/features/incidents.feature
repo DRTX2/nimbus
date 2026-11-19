@@ -76,3 +76,38 @@ Feature: Explainable pipeline incidents
     When I send a GET request to "/v1/reports/incident-quality/weekly"
     Then the response status should be 200
     And the response field "items.0.falsePositives" should be "1"
+
+  Scenario: A push pipeline with 30-second windows detects a stall within a minute
+    Given a fixture pipeline "orders-push" with 30-second windows
+    When the pipeline reports stalled metrics for the last two 30-second windows
+    Then a "consumer_stalled" incident should be open
+    And reporting stalled metrics for a 300-second window is rejected
+
+  Scenario: A mitigation that fails for good escalates the incident to a human
+    Given the webhook "flag-service" responds with statuses "503,503"
+    And the webhook "pager" responds with statuses "204"
+    And I create a workflow "Kill switch" triggered by "nimbus.incident.opened" with steps:
+      | id   | type | webhook      | maxAttempts |
+      | kill | http | flag-service | 2           |
+    And I create a workflow "Escalate" triggered by "nimbus.incident.escalated" with steps:
+      | id   | type | webhook |
+      | page | http | pager   |
+    And a fixture pipeline "orders" that dispatches the workflow "Kill switch" and escalates to "Escalate"
+    When the pipeline reports stalled metrics for the windows starting 15 and 10 minutes ago
+    Then a "consumer_stalled" incident should be open
+    And the webhook "pager" should receive an "escalated" notification for "consumer_stalled" on pipeline "orders" within 20 seconds
+    And the incident timeline should read "opened, escalated"
+
+  Scenario: A mitigation that succeeds never escalates
+    Given the webhook "flag-service" responds with statuses "204"
+    And I create a workflow "Kill switch" triggered by "nimbus.incident.opened" with steps:
+      | id   | type | webhook      |
+      | kill | http | flag-service |
+    And I create a workflow "Escalate" triggered by "nimbus.incident.escalated" with steps:
+      | id   | type |
+      | page | noop |
+    And a fixture pipeline "orders" that dispatches the workflow "Kill switch" and escalates to "Escalate"
+    When the pipeline reports stalled metrics for the windows starting 15 and 10 minutes ago
+    Then a "consumer_stalled" incident should be open
+    And the workflow "Kill switch" should have 1 execution within 15 seconds
+    And the workflow "Escalate" should have 0 executions within 3 seconds

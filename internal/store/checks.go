@@ -77,10 +77,10 @@ func (s *Store) claimTenantPipelineCheck(ctx context.Context, tenantID string, j
 		SET next_check_at=date_bin('5 minutes', now(), timestamptz 'epoch') + interval '5 minutes' + $2*interval '1 millisecond'
 		FROM due WHERE p.tenant_id=$1 AND p.id=due.id
 		RETURNING p.id,p.name,p.mode,p.region,p.queue_arn,p.lambda_arn,p.dlq_arn,COALESCE(p.role_arn,''),COALESCE(p.external_id_ref,''),
-			COALESCE(p.incident_workflow_id::text,''),COALESCE(p.recovery_workflow_id::text,''),p.status,p.consecutive_windows,p.backlog_threshold,p.age_threshold_seconds,p.created_at`,
+			COALESCE(p.incident_workflow_id::text,''),COALESCE(p.recovery_workflow_id::text,''),COALESCE(p.escalation_workflow_id::text,''),p.status,p.consecutive_windows,p.backlog_threshold,p.age_threshold_seconds,p.window_seconds,p.created_at`,
 		tenantID, jitter.Milliseconds()).Scan(&item.ID, &item.Name, &item.Mode, &item.Region,
-		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.Status, &item.ConsecutiveWindows,
-		&item.BacklogThreshold, &item.AgeThresholdSeconds, &item.CreatedAt)
+		&item.QueueARN, &item.LambdaARN, &item.DLQARN, &item.RoleARN, &item.ExternalIDRef, &item.IncidentWorkflowID, &item.RecoveryWorkflowID, &item.EscalationWorkflowID, &item.Status, &item.ConsecutiveWindows,
+		&item.BacklogThreshold, &item.AgeThresholdSeconds, &item.WindowSeconds, &item.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PipelineCheck{}, false, nil
 	}

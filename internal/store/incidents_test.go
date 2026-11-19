@@ -29,19 +29,54 @@ func TestContiguousDetectorWindows(t *testing.T) {
 		{WindowStartedAt: start.Add(5 * time.Minute), WindowEndedAt: start.Add(10 * time.Minute)},
 		{WindowStartedAt: start, WindowEndedAt: start.Add(5 * time.Minute)},
 	}
-	if !contiguousDetectorWindows(windows) {
+	if !contiguousDetectorWindows(windows, 5*time.Minute) {
 		t.Fatal("contiguous five-minute windows were rejected")
 	}
 
 	windows[1].WindowEndedAt = start.Add(4 * time.Minute)
-	if contiguousDetectorWindows(windows) {
+	if contiguousDetectorWindows(windows, 5*time.Minute) {
 		t.Fatal("a gap between detector windows was accepted")
 	}
 
 	windows[1].WindowEndedAt = start.Add(5 * time.Minute)
 	windows[1].WindowStartedAt = start.Add(-time.Minute)
-	if contiguousDetectorWindows(windows) {
+	if contiguousDetectorWindows(windows, 5*time.Minute) {
 		t.Fatal("an oversized or unaligned detector window was accepted")
+	}
+}
+
+func TestDetectorWindowsFollowThePipelineWindow(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	short := []Observation{
+		{WindowStartedAt: start.Add(30 * time.Second), WindowEndedAt: start.Add(60 * time.Second)},
+		{WindowStartedAt: start, WindowEndedAt: start.Add(30 * time.Second)},
+	}
+	if !contiguousDetectorWindows(short, 30*time.Second) {
+		t.Fatal("contiguous 30-second windows were rejected for a 30-second pipeline")
+	}
+	if contiguousDetectorWindows(short, 5*time.Minute) {
+		t.Fatal("30-second windows were accepted for a 5-minute pipeline")
+	}
+	if err := validateWindowShape(start.Add(10*time.Second), start.Add(40*time.Second), 30*time.Second); err == nil {
+		t.Fatal("a window off the 30-second boundary was accepted")
+	}
+	if err := validateWindowShape(start, start.Add(time.Minute), 30*time.Second); err == nil {
+		t.Fatal("a window longer than the pipeline window was accepted")
+	}
+}
+
+func TestValidatePipelineWindow(t *testing.T) {
+	for _, seconds := range []int{30, 60, 300} {
+		if err := validatePipeline(Pipeline{Name: "orders", Mode: "fixture", WindowSeconds: seconds}); err != nil {
+			t.Fatalf("%d-second push pipeline rejected: %v", seconds, err)
+		}
+	}
+	if err := validatePipeline(Pipeline{Name: "orders", Mode: "fixture", WindowSeconds: 45}); err == nil {
+		t.Fatal("unsupported window accepted")
+	}
+	aws := Pipeline{Name: "billing", Mode: "aws", RoleARN: "arn:aws:iam::123456789012:role/nimbus", ExternalIDRef: "aws-external-id/acme-prod", WindowSeconds: 60}
+	if err := validatePipeline(aws); err == nil {
+		t.Fatal("an AWS pipeline with a window CloudWatch cannot serve was accepted")
 	}
 }
 

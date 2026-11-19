@@ -16,8 +16,7 @@ func TestValidateObservationWindow(t *testing.T) {
 		start time.Time
 		end   time.Time
 	}{
-		{name: "wrong duration", start: now.Add(-10 * time.Minute), end: now.Add(-4 * time.Minute)},
-		{name: "unaligned", start: now.Add(-6 * time.Minute), end: now.Add(-time.Minute)},
+		{name: "end before start", start: now.Add(-2 * time.Minute), end: now.Add(-7 * time.Minute)},
 		{name: "future", start: now, end: now.Add(5 * time.Minute)},
 		{name: "stale", start: now.Add(-25 * time.Hour), end: now.Add(-25*time.Hour + 5*time.Minute)},
 	}
